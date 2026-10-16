@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "lab-hub-test",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [".claude/dev-server.sh"],
+      "port": 8000
+    }
+  ]
+}

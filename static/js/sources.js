@@ -5,6 +5,8 @@
 //   GitHubSource  — the page runs anywhere (GitHub Pages); reads/writes
 //                   board.json on the `data` branch through the GitHub REST
 //                   API, mirroring the Pi's sync cycle in the browser.
+//                   Without a token it only reads, from
+//                   raw.githubusercontent.com (no API rate limit per IP).
 //
 // Both implement the same interface:
 //   src.mode, src.canEdit, src.board, src.sync
@@ -31,15 +33,19 @@ export const DEFAULT_REPO = "richard-0417/lab-hub";
 export const DEFAULT_BRANCH = "data";
 export const DEFAULT_PATH = "board.json";
 export const DEFAULT_API = "https://api.github.com";
+export const DEFAULT_RAW = "https://raw.githubusercontent.com";
 export const SETTINGS_KEY = "labhub:github";
 
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const SEGMENT_RE = /^[A-Za-z0-9._-]+$/; // one part of a branch name or file path
 const TOKEN_RE = /^[\x21-\x7e]*$/; // printable ASCII (or empty); anything else can't go in a header
 const BAD_TOKEN_MSG = "The GitHub token contains invalid characters — paste it again";
 const LOCAL_OFFLINE_MSG = "Can't reach the dashboard server";
 const GH_OFFLINE_MSG = "Can't reach GitHub";
 const STALE_WINDOW_MS = 15000;
 const MAX_ATTEMPTS = 3;
+const MAX_BACKOFF_MS = 300000; // like the Pi's MAX_BACKOFF
+const DONE_CAP = 1000; // ids of pushed ops remembered for other tabs (see GitHubSource._mergeStored)
 
 // ------------------------------------------------------------------ helpers
 
@@ -109,26 +115,48 @@ function sdel(storage, key) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function fetchWithTimeout(fetchImpl, url, init, ms, controllers) {
-  const ctrl = typeof AbortController === "function" ? new AbortController() : null;
-  let timer = null;
-  if (ctrl) {
-    timer = setTimeout(() => ctrl.abort(), ms);
-    if (controllers) controllers.add(ctrl);
-  }
+function parseJson(text) {
+  if (!text) return null;
   try {
-    return await fetchImpl(url, ctrl ? Object.assign({}, init, { signal: ctrl.signal }) : init);
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (ctrl && controllers) controllers.delete(ctrl);
+    return JSON.parse(text);
+  } catch (_) {
+    return null;
   }
 }
 
-async function readJson(res) {
+/**
+ * fetch + read the body under ONE deadline (`ms`), so a reply whose headers
+ * arrive but whose body stalls can't hang a sync cycle. Resolves
+ * {res, data, text}: data is the parsed JSON body, or null when the body is
+ * empty or not JSON. Rejects on a network error, on the deadline, or when the
+ * request's controller (registered in `controllers`) is aborted by stop() —
+ * while waiting for the headers or for the body.
+ */
+async function fetchWithTimeout(fetchImpl, url, init, ms, controllers) {
+  const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+  let expire = () => {};
+  const deadline = new Promise((_, reject) => {
+    expire = () => reject(new Error("The request timed out or was cancelled"));
+  });
+  deadline.catch(() => {});
+  const timer = setTimeout(() => {
+    if (ctrl) ctrl.abort();
+    expire();
+  }, ms);
+  if (ctrl) {
+    ctrl.signal.addEventListener("abort", () => expire(), { once: true });
+    if (controllers) controllers.add(ctrl);
+  }
   try {
-    return await res.json();
-  } catch (_) {
-    return null;
+    const res = await Promise.race([fetchImpl(url, ctrl ? Object.assign({}, init, { signal: ctrl.signal }) : init), deadline]);
+    let text = "";
+    if (res.status !== 204 && res.status !== 304 && typeof res.text === "function") {
+      text = await Promise.race([res.text(), deadline]);
+    }
+    return { res, data: parseJson(text), text: typeof text === "string" ? text : "" };
+  } finally {
+    clearTimeout(timer);
+    if (ctrl && controllers) controllers.delete(ctrl);
   }
 }
 
@@ -154,6 +182,34 @@ function prepOp(op, clientName) {
   const copy = Object.assign({}, op);
   if (clientName && (typeof copy.by !== "string" || copy.by === "")) copy.by = clientName;
   return copy;
+}
+
+// Queue ids: every op queued by a GitHubSource gets one, so tabs sharing a
+// localStorage key can merge their queues (see GitHubSource._mergeStored).
+function newQid() {
+  let r = "";
+  try {
+    const a = new Uint32Array(2);
+    globalThis.crypto.getRandomValues(a);
+    r = a[0].toString(36) + a[1].toString(36);
+  } catch (_) {
+    r = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+  }
+  return `${Date.now().toString(36)}-${r}`;
+}
+
+// Deterministic id for an op stored by the old format (no queue ids), so two
+// tabs migrating the same record agree on it. FNV-1a, two seeds.
+function legacyQid(op) {
+  const s = JSON.stringify(op);
+  let a = 0x811c9dc5;
+  let b = 0x01000193 ^ s.length;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x5bd1e995) >>> 0;
+  }
+  return `v1-${a.toString(16)}${b.toString(16)}`;
 }
 
 function validateAll(ops) {
@@ -333,9 +389,8 @@ export class LocalSource {
     return this._enqueue(async () => {
       if (this._outbox.length) await this._flush();
       try {
-        const res = await this._request("POST", "api/sync", undefined, this._syncTimeoutMs);
+        const { res, data } = await this._request("POST", "api/sync", undefined, this._syncTimeoutMs);
         this._link = "up";
-        const data = await readJson(res);
         if (res.ok && data && typeof data === "object") this._serverSync = data;
       } catch (_) {
         if (this._halted) return this.sync;
@@ -367,6 +422,7 @@ export class LocalSource {
     return p;
   }
 
+  // -> {res, data}; rejects on network errors / timeout / stop().
   _request(method, url, body, timeoutMs) {
     const init = { method, cache: "no-store", headers: { Accept: "application/json" } };
     if (body !== undefined) {
@@ -405,8 +461,9 @@ export class LocalSource {
   async _load(force) {
     const url = this._rev !== null && !force ? `api/board?rev=${encodeURIComponent(this._rev)}` : "api/board";
     let res;
+    let data;
     try {
-      res = await this._request("GET", url);
+      ({ res, data } = await this._request("GET", url));
     } catch (_) {
       if (this._halted) return false;
       this._link = "down";
@@ -415,7 +472,6 @@ export class LocalSource {
       return false;
     }
     this._link = "up";
-    const data = await readJson(res);
     if (!res.ok || !data || typeof data !== "object") {
       this._httpError = res.ok ? "The dashboard server sent an unreadable reply" : `Dashboard server error (HTTP ${res.status})`;
       this._emit();
@@ -442,8 +498,9 @@ export class LocalSource {
     while (this._outbox.length && !this._halted) {
       const batch = this._outbox.slice(0, LIMITS.maxOpsPerPost);
       let res;
+      let data;
       try {
-        res = await this._request("POST", "api/ops", { ops: batch });
+        ({ res, data } = await this._request("POST", "api/ops", { ops: batch }));
       } catch (_) {
         if (this._halted) break;
         this._link = "down";
@@ -452,7 +509,6 @@ export class LocalSource {
         break;
       }
       this._link = "up";
-      const data = await readJson(res);
       if (res.ok && data && typeof data === "object" && data.board) {
         this._httpError = null;
         this._dropFromOutbox(batch);
@@ -511,15 +567,80 @@ function str(v) {
   return typeof v === "string" ? v.trim() : "";
 }
 
-/** Fill defaults and tidy a settings object (accepts a pasted github.com URL as repo). */
-export function normalizeGitHubSettings(settings) {
+function isLocalHostname(hostname) {
+  const h = String(hostname || "").toLowerCase();
+  return h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h === "::1" || h.endsWith(".localhost");
+}
+
+/**
+ * May this page use an API base other than https://api.github.com (a mock
+ * server)? Only on a local development page (localhost, 127.0.0.1, [::1],
+ * *.localhost) or outside a browser (no `location`, e.g. node tests).
+ * Anywhere else — the GitHub Pages site — the token only ever goes to
+ * api.github.com, whatever a link's ?api= or a saved setting says.
+ */
+export function customApiAllowed(loc) {
+  if (loc === undefined) loc = typeof location !== "undefined" ? location : null;
+  if (!loc || typeof loc.hostname !== "string") return true;
+  return isLocalHostname(loc.hostname);
+}
+
+function cleanApiBase(value, loc) {
+  const api = (str(value) || DEFAULT_API).replace(/\/+$/, "");
+  if (api === DEFAULT_API) return api;
+  if (!/^https?:\/\/[^\s/?#@]+(\/[^\s?#]*)?$/i.test(api) || !customApiAllowed(loc)) return DEFAULT_API;
+  return api;
+}
+
+/** "owner/name", neither part "." or "..". */
+function repoOk(repo) {
+  return typeof repo === "string" && REPO_RE.test(repo) && repo.split("/").every((p) => !/^\.+$/.test(p));
+}
+
+/**
+ * A branch name or file path that is safe to put in an API URL: parts of
+ * [A-Za-z0-9._-] separated by single "/", no "." / ".." parts (they would
+ * walk the URL out of /repos/<repo>/contents/). Branches also follow git's
+ * ref rules (no "..", no part starting with "." or ending with ".lock" / ".").
+ */
+function refOk(value, isBranch) {
+  if (typeof value !== "string" || !value || value.length > (isBranch ? 255 : 1024)) return false;
+  if (isBranch && value.includes("..")) return false;
+  return value.split("/").every(
+    (seg) =>
+      SEGMENT_RE.test(seg) &&
+      !/^\.+$/.test(seg) &&
+      (!isBranch || (!seg.startsWith(".") && !seg.endsWith(".") && !seg.toLowerCase().endsWith(".lock"))),
+  );
+}
+
+/**
+ * Why these settings can't be used (a message for the user), or null.
+ * Checks the repo, branch, file path and token characters.
+ */
+export function githubSettingsError(settings) {
+  const s = normalizeGitHubSettings(settings);
+  if (!repoOk(s.repo)) return "Repo must look like owner/name";
+  if (!refOk(s.branch, true)) return `"${s.branch}" isn't a usable branch name (letters, digits, . _ - and /)`;
+  if (!refOk(s.path, false)) return `"${s.path}" isn't a usable file path (letters, digits, . _ - and /; no "." or ".." parts)`;
+  if (!TOKEN_RE.test(s.token)) return BAD_TOKEN_MSG;
+  return null;
+}
+
+/**
+ * Fill defaults and tidy a settings object (accepts a pasted github.com URL
+ * as repo). apiBase falls back to https://api.github.com unless
+ * customApiAllowed(loc). Branch and path are kept as typed — check them with
+ * githubSettingsError().
+ */
+export function normalizeGitHubSettings(settings, loc) {
   const s = settings && typeof settings === "object" ? settings : {};
   const repo = str(s.repo)
     .replace(/^https?:\/\/(www\.)?github\.com\//i, "")
     .replace(/\.git$/i, "")
     .replace(/\/+$/, "");
   return {
-    apiBase: (str(s.apiBase) || DEFAULT_API).replace(/\/+$/, ""),
+    apiBase: cleanApiBase(s.apiBase, loc),
     repo,
     branch: str(s.branch) || DEFAULT_BRANCH,
     path: str(s.path).replace(/^\/+/, "") || DEFAULT_PATH,
@@ -539,6 +660,8 @@ export function githubCacheKey(settings) {
  * (root site => "<owner>/<owner>.github.io"), else "richard-0417/lab-hub".
  * ?repo= ?branch= ?path= ?api= prefill these defaults (they never override
  * saved settings — use `loadGitHubSettings() || defaultGitHubSettings()`).
+ * A ?branch= or ?path= that isn't usable is ignored, and ?api= is honoured
+ * only on a local development page (customApiAllowed).
  */
 export function defaultGitHubSettings(loc) {
   if (loc === undefined) loc = typeof location !== "undefined" ? location : null;
@@ -566,11 +689,13 @@ export function defaultGitHubSettings(loc) {
   }
   if (q) {
     if (str(q.get("repo"))) s.repo = str(q.get("repo"));
-    if (str(q.get("branch"))) s.branch = str(q.get("branch"));
-    if (str(q.get("path"))) s.path = str(q.get("path"));
-    if (str(q.get("api"))) s.apiBase = str(q.get("api"));
+    const branch = str(q.get("branch"));
+    if (refOk(branch, true)) s.branch = branch;
+    const path = str(q.get("path")).replace(/^\/+/, "");
+    if (refOk(path, false)) s.path = path;
+    if (str(q.get("api")) && customApiAllowed(loc)) s.apiBase = str(q.get("api"));
   }
-  return normalizeGitHubSettings(s);
+  return normalizeGitHubSettings(s, loc);
 }
 
 /** Saved settings (key "labhub:github"), or null when none are saved. */
@@ -650,20 +775,20 @@ function githubFailure(res, data, { token, repo, what = "request" } = {}) {
 export async function testGitHubSettings(settings, fetchImpl) {
   const s = normalizeGitHubSettings(settings);
   const fail = (error) => ({ ok: false, error, canWrite: false, private: false });
-  if (!REPO_RE.test(s.repo)) return fail("Repo must look like owner/name");
-  if (!TOKEN_RE.test(s.token)) return fail(BAD_TOKEN_MSG);
+  const bad = githubSettingsError(s);
+  if (bad) return fail(bad);
   let res;
+  let data;
   try {
-    res = await fetchWithTimeout(
+    ({ res, data } = await fetchWithTimeout(
       fetchImpl || defaultFetch,
       `${s.apiBase}/repos/${s.repo}`,
       { method: "GET", headers: ghHeaders(s.token), cache: "no-store" },
       15000,
-    );
+    ));
   } catch (_) {
     return fail(GH_OFFLINE_MSG);
   }
-  const data = await readJson(res);
   if (res.ok && data && typeof data === "object") {
     const canWrite = !!s.token && !!(data.permissions && data.permissions.push === true);
     const error = s.token && !canWrite ? "The token works, but it can't write to this repo (needs Contents: read & write)" : null;
@@ -689,14 +814,14 @@ export async function detectMode({ fetchImpl, timeoutMs = 2500, retryDelaysMs = 
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
     if (attempt > 0) await sleep(retryDelaysMs[attempt - 1]);
     let res;
+    let data;
     try {
-      res = await fetchWithTimeout(f, "api/config", { cache: "no-store", headers: { Accept: "application/json" } }, timeoutMs);
+      ({ res, data } = await fetchWithTimeout(f, "api/config", { cache: "no-store", headers: { Accept: "application/json" } }, timeoutMs));
     } catch (_) {
       continue;
     }
     if (res.status >= 500) continue;
     if (!res.ok) return { mode: "github" };
-    const data = await readJson(res);
     if (data && typeof data === "object" && data.labhub === true) return { mode: "local", config: data };
     return { mode: "github" };
   }
@@ -708,11 +833,34 @@ export async function detectMode({ fetchImpl, timeoutMs = 2500, retryDelaysMs = 
 /**
  * Reads/writes board.json through the GitHub Contents API (sha-checked
  * rebase of pending ops — the same cycle as the Pi). Without a token it is
- * read-only. base/sha/etag/pending persist in storage under
- * "labhub:gh:<repo>:<branch>:<path>".
+ * read-only and reads the file from raw.githubusercontent.com, which doesn't
+ * count against GitHub's 60 requests/hour per-IP API limit (its CDN caches
+ * for up to 5 minutes, so a read-only view can lag that much).
+ *
+ * base/sha/etag and the pending ops persist in storage under
+ * "labhub:gh:<repo>:<branch>:<path>". Every tab of a browser shares that
+ * key, so the stored queue is merged, never overwritten: each queued op has
+ * a queue id (qid); a tab writes the union of its own queue and the ops other
+ * tabs stored, minus `done` (qids already pushed, also stored). Tabs adopt
+ * each other's queued ops (on "storage" events and after every pull), so an
+ * edit made in a tab that closes before pushing is pushed by another tab or
+ * by the next page load.
  */
 export class GitHubSource {
-  constructor(settings, { fetchImpl, storage, pollMs = 20000, readonlyPollMs = 90000, pushDelayMs = 800, timeoutMs = 15000 } = {}) {
+  constructor(
+    settings,
+    {
+      fetchImpl,
+      storage,
+      pollMs = 20000,
+      readonlyPollMs = 90000,
+      pushDelayMs = 800,
+      timeoutMs = 15000,
+      maxBackoffMs = MAX_BACKOFF_MS,
+      readonlyWakeMs = 60000,
+      rawBase,
+    } = {},
+  ) {
     this._s = normalizeGitHubSettings(settings);
     this.mode = "github";
     this.canEdit = !!this._s.token;
@@ -722,18 +870,27 @@ export class GitHubSource {
     this._readonlyPollMs = readonlyPollMs;
     this._pushDelayMs = pushDelayMs;
     this._timeoutMs = timeoutMs;
+    this._maxBackoffMs = maxBackoffMs;
+    this._readonlyWakeMs = readonlyWakeMs;
+    // Read-only pulls use the raw host — only in front of the real GitHub API
+    // (a mock server has none). null = always read through the API.
+    this._rawBase = rawBase !== undefined ? rawBase : this._s.apiBase === DEFAULT_API ? DEFAULT_RAW : null;
+    this._rawBlocked = false; // raw host unreachable but the API works: read through the API
+    this._rawText = null; // last body read from the raw host (it sends no sha)
     this._key = githubCacheKey(this._s);
     this._subs = new Set();
 
     this._base = null; // last remote board seen (normalized)
     this._sha = null;
     this._etag = null;
-    this._pending = [];
+    this._queue = []; // pending ops in order: {qid, op}
+    this._done = new Map(); // qid -> true: ops pushed (or dropped) by any tab, oldest first
     this._remoteMissing = false; // file/branch doesn't exist yet
     this._remoteInvalid = false; // file isn't valid JSON
     this._needsFix = false; // normalized remote differs from its raw parse
     this._recentPush = null; // {oldSha, until}: ignore stale reads right after a write
-    this._backoffUntil = 0;
+    this._backoffUntil = 0; // rate limited until then
+    this._failures = 0; // consecutive failed cycles (exponential backoff, like the Pi)
 
     this._state = this.canEdit ? "syncing" : "readonly";
     this._lastError = null;
@@ -765,12 +922,13 @@ export class GitHubSource {
 
   get sync() {
     const s = this._s;
+    const pending = this._pendingCount();
     let state = this._state;
-    if (state === "ok" && this._pending.length) state = "pending";
+    if (state === "ok" && pending) state = "pending";
     return {
       enabled: true,
       state,
-      pending: this._pending.length,
+      pending,
       last_sync: this._lastSync,
       last_push: this._lastPush,
       last_error: this._lastError,
@@ -803,7 +961,7 @@ export class GitHubSource {
     this._active = true;
     this._halted = false;
     this._listen();
-    if (this._base !== null || this._pending.length) this._emit(true);
+    if (this._base !== null || this._queue.length) this._emit(true);
     await this._runCycle();
   }
 
@@ -819,16 +977,16 @@ export class GitHubSource {
   /**
    * Validate (throws Error(message); Error("read-only") without a token),
    * queue + persist, apply optimistically (subscribers fire immediately),
-   * and push after a short debounce.
+   * and push after a short debounce (at once if the page is hidden first).
    */
   async submit(ops) {
     if (!this.canEdit) throw new Error("read-only");
     const list = validateAll(ops);
     if (!list.length) return this.sync;
-    this._pending.push(...list.map((op) => prepOp(op, this._s.clientName)));
+    for (const op of list) this._queue.push({ qid: newQid(), op: prepOp(op, this._s.clientName) });
     this._dirty = true;
     this._refresh();
-    this._schedule(this._pushDelayMs);
+    this._schedule(this._pushDelayMs); // also cuts short an error backoff, like the Pi's kick()
     return this.sync;
   }
 
@@ -843,46 +1001,154 @@ export class GitHubSource {
   _listen() {
     if (this._unlisten.length) return;
     const wake = () => {
-      if (Date.now() - this._lastCycleAt > 2000) this._runCycle();
+      // Without a token every read costs quota (or is CDN-cached anyway): don't
+      // re-read on every tab switch.
+      const gap = this.canEdit ? 2000 : this._readonlyWakeMs;
+      if (Date.now() - this._lastCycleAt > gap) this._runCycle();
+    };
+    // Push queued edits as soon as the page is hidden or left: a phone may
+    // suspend it before the debounce timer fires.
+    const flush = () => {
+      if (this.canEdit && this._pendingCount() && this._state !== "error") this._runCycle();
     };
     if (hasDocument()) {
       this._unlisten.push(
         listen(document, "visibilitychange", () => {
           if (document.visibilityState === "visible") wake();
+          else if (document.visibilityState === "hidden") flush();
         }),
       );
     }
-    if (hasWindow()) this._unlisten.push(listen(window, "online", wake));
+    if (hasWindow()) {
+      this._unlisten.push(listen(window, "online", wake));
+      this._unlisten.push(listen(window, "pagehide", flush));
+      this._unlisten.push(
+        listen(window, "storage", (e) => {
+          if (!e || e.key === this._key) this._onStorage();
+        }),
+      );
+    }
   }
 
-  _restore() {
+  // Another tab wrote our storage key: adopt the ops it queued and note the
+  // ones it pushed (they leave this tab's queue after its next pull).
+  _onStorage() {
+    if (this._halted) return;
+    if (this._mergeStored(false)) {
+      this._recompute();
+      this._emit();
+    }
+  }
+
+  // The stored record: {data, queue: [{qid, op}], done: [qid]}, or null.
+  _readStored() {
     const raw = sget(this._storage, this._key);
-    if (!raw) return;
+    if (!raw) return null;
     let data = null;
     try {
       data = JSON.parse(raw);
     } catch (_) {
-      return;
+      return null;
     }
-    if (!data || typeof data !== "object") return;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    const queue = [];
+    const seen = new Set();
+    const add = (qid, op) => {
+      if (typeof qid !== "string" || !qid || seen.has(qid) || validateOp(op)) return;
+      seen.add(qid);
+      queue.push({ qid, op });
+    };
+    if (Array.isArray(data.queue)) {
+      for (const e of data.queue) if (e && typeof e === "object") add(e.qid, e.op);
+    } else if (Array.isArray(data.pending)) {
+      // format v1 (ops without queue ids)
+      for (const op of data.pending) if (!validateOp(op)) add(legacyQid(op), op);
+    }
+    const done = Array.isArray(data.done) ? data.done.filter((q) => typeof q === "string" && q) : [];
+    return { data, queue, done };
+  }
+
+  _restore() {
+    const rec = this._readStored();
+    if (!rec) return;
+    const data = rec.data;
     if (data.base && typeof data.base === "object") {
       this._base = normalizeBoard(data.base);
       this._sha = typeof data.sha === "string" ? data.sha : null;
       this._etag = this._sha && typeof data.etag === "string" ? data.etag : null;
     }
-    if (Array.isArray(data.pending)) this._pending = data.pending.filter((op) => !validateOp(op));
+    for (const q of rec.done) this._noteDone(q);
+    this._queue = rec.queue.filter((e) => !this._done.has(e.qid));
     if (typeof data.last_sync === "string") this._lastSync = data.last_sync;
     if (typeof data.last_push === "string") this._lastPush = data.last_push;
+  }
+
+  // Remember a pushed op's qid. mine: pushed by this tab just now (kept as the
+  // newest). Returns true when it wasn't known yet.
+  _noteDone(qid, mine = false) {
+    const known = this._done.has(qid);
+    if (known && !mine) return false;
+    if (known) this._done.delete(qid);
+    this._done.set(qid, true);
+    while (this._done.size > DONE_CAP) this._done.delete(this._done.keys().next().value);
+    return !known;
+  }
+
+  _pendingCount() {
+    let n = 0;
+    for (const e of this._queue) if (!this._done.has(e.qid)) n++;
+    return n;
+  }
+
+  /**
+   * Fold in what other tabs stored under our key: the qids they pushed
+   * (`done`) and the ops they queued but haven't pushed (appended in their
+   * order). dropDone: also remove pushed ops from this tab's queue — only
+   * right after a pull, so the view never loses an edit its base doesn't
+   * contain yet. Returns true when the queue or the pending count changed.
+   */
+  _mergeStored(dropDone) {
+    const rec = this._readStored();
+    let changed = false;
+    if (rec) {
+      const have = new Set(this._queue.map((e) => e.qid));
+      for (const q of rec.done) if (this._noteDone(q) && have.has(q)) changed = true;
+      for (const e of rec.queue) {
+        if (have.has(e.qid) || this._done.has(e.qid)) continue;
+        this._queue.push(e);
+        have.add(e.qid);
+        changed = true;
+      }
+    }
+    if (dropDone) {
+      const n = this._queue.length;
+      this._queue = this._queue.filter((e) => !this._done.has(e.qid));
+      if (this._queue.length !== n) changed = true;
+    }
+    return changed;
+  }
+
+  // Ops pushed (or found to change nothing): drop them from the queue and
+  // remember their qids, so other tabs drop their copies too.
+  _settle(batch) {
+    const ids = new Set();
+    for (const e of batch) {
+      ids.add(e.qid);
+      this._noteDone(e.qid, true);
+    }
+    this._queue = this._queue.filter((e) => !ids.has(e.qid));
+    this._dirty = true;
   }
 
   _persist() {
     if (!this._dirty) return;
     const data = {
-      v: 1,
+      v: 2,
       base: this._base,
       sha: this._sha,
       etag: this._etag,
-      pending: this._pending,
+      queue: this._queue.filter((e) => !this._done.has(e.qid)),
+      done: Array.from(this._done.keys()),
       last_sync: this._lastSync,
       last_push: this._lastPush,
     };
@@ -895,7 +1161,7 @@ export class GitHubSource {
   }
 
   _recompute() {
-    const view = applyOps(this._base || emptyBoard(), this._pending);
+    const view = applyOps(this._base || emptyBoard(), this._queue.map((e) => e.op));
     const key = serializeBoard(view);
     if (key !== this._viewKey) {
       this._view = view;
@@ -913,6 +1179,8 @@ export class GitHubSource {
   }
 
   _refresh() {
+    // Merge first: the stored record is shared with this browser's other tabs.
+    if (this._dirty) this._mergeStored(false);
     this._recompute();
     this._persist();
     this._emit();
@@ -923,7 +1191,13 @@ export class GitHubSource {
     this._lastError = message;
     this._link = state === "offline" ? "down" : "up";
     if (retryAt) this._backoffUntil = retryAt;
+    if (state === "error" || state === "offline") this._failures++;
     this._refresh();
+  }
+
+  // A cycle that ended well (pulled, and pushed whatever needed pushing).
+  _succeeded() {
+    this._failures = 0;
   }
 
   _interval() {
@@ -935,8 +1209,12 @@ export class GitHubSource {
     clearTimeout(this._timer);
     let delay;
     if (delayOverride != null) delay = delayOverride;
-    else if (this.canEdit && this._pending.length && (this._state === "ok" || this._state === "syncing")) delay = this._pushDelayMs;
-    else delay = this._interval();
+    else if (this.canEdit && this._pendingCount() && (this._state === "ok" || this._state === "syncing")) delay = this._pushDelayMs;
+    else if (this._failures > 0 && (this._state === "error" || this._state === "offline")) {
+      // interval * 2^(failures-1), capped (never shorter than the interval)
+      const base = this._interval();
+      delay = Math.max(base, Math.min(this._maxBackoffMs, base * 2 ** Math.min(this._failures - 1, 16)));
+    } else delay = this._interval();
     const wait = this._backoffUntil - Date.now();
     if (wait > delay) delay = Math.min(wait + 500, 3600000);
     this._timer = setTimeout(() => {
@@ -978,6 +1256,24 @@ export class GitHubSource {
     return withRef ? `${url}?ref=${encodeURIComponent(this._s.branch)}` : url;
   }
 
+  _rawUrl() {
+    return `${this._rawBase}/${this._s.repo}/refs/heads/${encSegments(this._s.branch)}/${encSegments(this._s.path)}`;
+  }
+
+  // Defence in depth on top of githubSettingsError(): every request URL must
+  // stay inside /repos/<repo>/ once the URL parser has resolved it.
+  _urlError() {
+    try {
+      const repoPath = new URL(this._repoUrl()).pathname;
+      const contents = new URL(this._contentsUrl(false)).pathname;
+      if (repoPath.endsWith(`/repos/${this._s.repo}`) && contents.startsWith(`${repoPath}/contents/`)) return null;
+    } catch (_) {
+      // fall through
+    }
+    return "These GitHub settings don't make a valid API address — check the repo, branch and file";
+  }
+
+  // -> {res, data, text}; rejects on network errors / timeout / stop().
   _request(method, url, body, extraHeaders) {
     const headers = Object.assign(ghHeaders(this._s.token), extraHeaders || {});
     const init = { method, headers, cache: "no-store" };
@@ -988,9 +1284,13 @@ export class GitHubSource {
     return fetchWithTimeout(this._fetch, url, init, this._timeoutMs, this._controllers);
   }
 
-  async _failure(res, data, what) {
-    const d = data === undefined ? await readJson(res) : data;
-    return githubFailure(res, d, { token: this._s.token, repo: this._s.repo, what });
+  _failure(res, data, what) {
+    return githubFailure(res, data, { token: this._s.token, repo: this._s.repo, what });
+  }
+
+  _errorOf(res, data, what) {
+    const f = this._failure(res, data, what);
+    return { error: f.message, retryAt: f.retryAt };
   }
 
   _isStale(sha) {
@@ -998,19 +1298,76 @@ export class GitHubSource {
     return !!r && Date.now() < r.until && sha === r.oldSha;
   }
 
+  _notFoundMessage() {
+    return `${this._s.path} not found on the "${this._s.branch}" branch of ${this._s.repo} — if the repo is private, add a token to view it`;
+  }
+
   // Step 1 of the cycle. Returns {changed} | {offline} | {error, retryAt}.
   async _pull() {
+    if (!this.canEdit && this._rawBase && !this._rawBlocked) {
+      const r = await this._pullRaw();
+      if (!r.offline || this._halted) return r;
+      // The raw host may be blocked on this network: try the API.
+      const a = await this._pullApi();
+      if (!a.offline) this._rawBlocked = true;
+      return a;
+    }
+    return this._pullApi();
+  }
+
+  // Read-only pull from raw.githubusercontent.com: a plain GET (no custom
+  // headers, so no CORS preflight) that doesn't use the API's per-IP quota.
+  async _pullRaw() {
+    let res;
+    let text;
+    try {
+      ({ res, text } = await fetchWithTimeout(this._fetch, this._rawUrl(), { method: "GET", cache: "no-cache" }, this._timeoutMs, this._controllers));
+    } catch (_) {
+      return { offline: true };
+    }
+    if (res.status === 200) {
+      if (text === this._rawText && this._base && !this._remoteInvalid) return { changed: false };
+      let raw;
+      try {
+        raw = JSON.parse(text);
+      } catch (e) {
+        this._remoteInvalid = true;
+        return { error: `${this._s.path} on GitHub is not valid JSON: ${(e && e.message) || e}` };
+      }
+      this._base = normalizeBoard(raw);
+      this._sha = null; // the raw host sends no blob sha
+      this._etag = null;
+      this._rawText = text;
+      this._remoteMissing = false;
+      this._remoteInvalid = false;
+      this._needsFix = false; // read-only: nothing to fix
+      this._dirty = true;
+      return { changed: true };
+    }
+    // A 404 can't tell "no such file" from "private repo": one message, no extra request.
+    if (res.status === 404) return { error: this._notFoundMessage() };
+    if (res.status === 403 || res.status === 429) {
+      const retryAfter = Number(header(res, "retry-after"));
+      return {
+        error: `GitHub is limiting requests from this network (HTTP ${res.status}) — will retry`,
+        retryAt: Date.now() + (retryAfter > 0 ? retryAfter * 1000 : 60000),
+      };
+    }
+    return { error: `GitHub returned HTTP ${res.status} for ${this._s.path}` };
+  }
+
+  async _pullApi() {
     const extra = {};
     if (this._etag && this._base && this._sha) extra["If-None-Match"] = this._etag;
     let res;
+    let data;
     try {
-      res = await this._request("GET", this._contentsUrl(true), undefined, extra);
+      ({ res, data } = await this._request("GET", this._contentsUrl(true), undefined, extra));
     } catch (_) {
       return { offline: true };
     }
     if (res.status === 304) return { changed: false };
     if (res.status === 200) {
-      const data = await readJson(res);
       if (!data || typeof data !== "object" || Array.isArray(data)) {
         return { error: `GitHub sent an unexpected reply for ${this._s.path} (is it a folder?)` };
       }
@@ -1029,13 +1386,13 @@ export class GitHubSource {
       if (sha && (data.encoding === "none" || (!b64 && data.size > 0))) {
         // Files over 1 MB come without content; fetch the blob instead.
         let blobRes;
+        let blob;
         try {
-          blobRes = await this._request("GET", `${this._repoUrl()}/git/blobs/${sha}`);
+          ({ res: blobRes, data: blob } = await this._request("GET", `${this._repoUrl()}/git/blobs/${sha}`));
         } catch (_) {
           return { offline: true };
         }
-        if (!blobRes.ok) return this._errorOf(blobRes, "read");
-        const blob = await readJson(blobRes);
+        if (!blobRes.ok) return this._errorOf(blobRes, blob, "read");
         b64 = blob && typeof blob.content === "string" ? blob.content : "";
       }
       let raw;
@@ -1056,18 +1413,19 @@ export class GitHubSource {
       return { changed: true };
     }
     if (res.status === 404) {
+      // Without a token the repo check would cost another of the 60 requests
+      // an hour this IP gets — and read-only can't create the file anyway.
+      if (!this.canEdit) return { error: this._notFoundMessage() };
       // The file or the branch doesn't exist yet — or the repo is invisible.
       let repoRes;
+      let repo;
       try {
-        repoRes = await this._request("GET", this._repoUrl());
+        ({ res: repoRes, data: repo } = await this._request("GET", this._repoUrl()));
       } catch (_) {
         return { offline: true };
       }
       if (repoRes.status === 404) return { error: "repo not found, or the token can't see it" };
-      if (!repoRes.ok) {
-        const f = await this._failure(repoRes, undefined, "read");
-        return { error: f.message, retryAt: f.retryAt };
-      }
+      if (!repoRes.ok) return this._errorOf(repoRes, repo, "read");
       if (this._isStale(null)) return { changed: false };
       this._base = emptyBoard();
       this._sha = null;
@@ -1078,35 +1436,36 @@ export class GitHubSource {
       this._dirty = true;
       return { changed: true };
     }
-    const f = await this._failure(res, undefined, "read");
-    return { error: f.message, retryAt: f.retryAt };
+    return this._errorOf(res, data, "read");
   }
 
-  // PUT the file. Returns {ok, sha} | {conflict} | {branchMissing, status, message} | {offline} | {error, retryAt}.
+  // PUT the file.
+  // Returns {ok, sha} | {conflict, message} | {branchMissing, status, message} | {offline} | {error, retryAt}.
   async _put(doc, message) {
     const body = { message, content: utf8ToBase64(serializeBoard(doc)), branch: this._s.branch };
     if (this._sha) body.sha = this._sha;
     let res;
+    let data;
     try {
-      res = await this._request("PUT", this._contentsUrl(false), body);
+      ({ res, data } = await this._request("PUT", this._contentsUrl(false), body));
     } catch (_) {
       return { offline: true };
     }
-    const data = await readJson(res);
     if (res.status === 200 || res.status === 201) {
       const sha = data && data.content && typeof data.content.sha === "string" ? data.content.sha : null;
       return { ok: true, sha };
     }
     const msg = data && typeof data.message === "string" ? data.message : "";
-    if (res.status === 409) return { conflict: true };
-    if (res.status === 422) {
-      if (/sha/i.test(msg)) return { conflict: true };
-      if (/branch|ref/i.test(msg)) return { branchMissing: true, status: 422, message: msg };
-      return { error: `GitHub rejected the write (422)${msg ? `: ${msg}` : ""}` };
+    // Classified like the Pi (github_sync._is_sha_conflict / _is_branch_missing).
+    if (res.status === 409 || (res.status === 422 && /sha/i.test(msg))) return { conflict: true, message: msg };
+    if ((res.status === 404 || res.status === 422) && /branch/i.test(msg) && /not found/i.test(msg)) {
+      return { branchMissing: true, status: res.status, message: msg };
     }
-    if (res.status === 404) return { branchMissing: true, status: 404, message: msg };
-    const f = await this._failure(res, data, "write");
-    return { error: f.message, retryAt: f.retryAt };
+    if (res.status === 422) return { error: `GitHub rejected the write (422)${msg ? `: ${msg}` : ""}` };
+    if (res.status === 404) {
+      return { error: `GitHub refused the write (404)${msg ? `: ${msg}` : ""} — check the token has Contents: read & write on ${this._s.repo}` };
+    }
+    return this._errorOf(res, data, "write");
   }
 
   // Create the data branch from the default branch.
@@ -1115,35 +1474,27 @@ export class GitHubSource {
     const api = this._repoUrl();
     const branch = this._s.branch;
     try {
-      const repoRes = await this._request("GET", api);
+      const { res: repoRes, data: repo } = await this._request("GET", api);
       if (repoRes.status === 404) return { error: "repo not found, or the token can't see it" };
-      if (!repoRes.ok) return this._errorOf(repoRes, "read");
-      const repo = await readJson(repoRes);
+      if (!repoRes.ok) return this._errorOf(repoRes, repo, "read");
       const def = repo && typeof repo.default_branch === "string" ? repo.default_branch : "main";
       if (def === branch) return { exists: true };
-      const refRes = await this._request("GET", `${api}/git/ref/heads/${encSegments(def)}`);
+      const { res: refRes, data: ref } = await this._request("GET", `${api}/git/ref/heads/${encSegments(def)}`);
       if (refRes.status === 404 || refRes.status === 409) {
         return { error: `Can't create the "${branch}" branch: "${def}" has no commits yet (push the code first)` };
       }
-      if (!refRes.ok) return this._errorOf(refRes, "read");
-      const ref = await readJson(refRes);
+      if (!refRes.ok) return this._errorOf(refRes, ref, "read");
       const sha = ref && ref.object && typeof ref.object.sha === "string" ? ref.object.sha : null;
       if (!sha) return { error: `GitHub sent an unexpected reply for branch "${def}"` };
-      const postRes = await this._request("POST", `${api}/git/refs`, { ref: `refs/heads/${branch}`, sha });
+      const { res: postRes, data } = await this._request("POST", `${api}/git/refs`, { ref: `refs/heads/${branch}`, sha });
       if (postRes.ok) return { created: true };
-      const data = await readJson(postRes);
       const msg = data && typeof data.message === "string" ? data.message : "";
       if (postRes.status === 422 && /already exists/i.test(msg)) return { exists: true };
       if (postRes.status === 422) return { error: `Couldn't create branch "${branch}": ${msg || "rejected"}` };
-      return this._errorOf(postRes, "write", data);
+      return this._errorOf(postRes, data, "write");
     } catch (_) {
       return { offline: true };
     }
-  }
-
-  async _errorOf(res, what, data) {
-    const f = await this._failure(res, data, what);
-    return { error: f.message, retryAt: f.retryAt };
   }
 
   _commitMessage(ops) {
@@ -1157,15 +1508,18 @@ export class GitHubSource {
   }
 
   async _cycle() {
-    if (!REPO_RE.test(this._s.repo)) {
+    if (!repoOk(this._s.repo)) {
       this._fail("error", "Set the GitHub repo (owner/name) in Settings");
       return;
     }
-    if (!TOKEN_RE.test(this._s.token)) {
-      this._fail("error", BAD_TOKEN_MSG);
+    const bad = githubSettingsError(this._s) || this._urlError();
+    if (bad) {
+      this._fail("error", bad);
       return;
     }
     if (Date.now() < this._backoffUntil) return; // rate limited: wait for the reset
+    let lastConflict = "";
+    let branchCreated = false;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       // 1. pull
       const r = await this._pull();
@@ -1177,20 +1531,20 @@ export class GitHubSource {
       this._lastError = null;
       this._backoffUntil = 0;
       this._state = this.canEdit ? "ok" : "readonly";
-      // 2. new view
+      // 2. new view (with ops other tabs queued; minus the ones they pushed)
+      if (this._mergeStored(true)) this._dirty = true;
       this._refresh();
-      if (!this.canEdit) return;
+      if (!this.canEdit) return this._succeeded();
       // 3. push if needed
-      const k = this._pending.length;
-      if (k === 0 && !this._remoteMissing && !this._needsFix) return;
-      const ops = this._pending.slice(0, k);
+      const batch = this._queue.slice();
+      if (!batch.length && !this._remoteMissing && !this._needsFix) return this._succeeded();
+      const ops = batch.map((e) => e.op);
       const doc = applyOps(this._base, ops);
       if (!this._remoteMissing && !this._needsFix && contentKey(doc) === contentKey(this._base)) {
         // These ops change nothing on GitHub (e.g. edits to items deleted elsewhere).
-        this._pending.splice(0, k);
-        this._dirty = true;
+        this._settle(batch);
         this._refresh();
-        return;
+        return this._succeeded();
       }
       const last = ops.length ? canonicalTimestamp(ops[ops.length - 1].ts) : null;
       const out = Object.assign({}, doc, {
@@ -1209,37 +1563,40 @@ export class GitHubSource {
         this._etag = null;
         this._remoteMissing = false;
         this._needsFix = false;
-        this._pending.splice(0, k);
+        this._settle(batch); // exactly the ops in this PUT; newer ones stay queued
         this._lastPush = nowIso();
         this._lastSync = this._lastPush;
         this._state = "ok";
-        this._dirty = true;
         this._refresh();
-        return;
+        return this._succeeded();
       }
       if (w.conflict) {
-        this._etag = null; // someone else wrote first: refetch, replay, retry
+        // Someone else wrote first: refetch, replay, retry. (After the last
+        // attempt keep the etag, so the next cycle's GET can be a free 304.)
+        lastConflict = w.message || "";
+        if (attempt < MAX_ATTEMPTS - 1) this._etag = null;
         continue;
       }
-      if (w.branchMissing) {
+      if (w.branchMissing && !branchCreated) {
+        branchCreated = true;
         const c = await this._createBranch();
         if (this._halted) return;
         if (c.offline) return this._fail("offline", GH_OFFLINE_MSG);
         if (c.error) return this._fail("error", c.error, c.retryAt);
-        if (c.exists && w.status === 404) {
-          return this._fail(
-            "error",
-            `GitHub refused the write (404)${w.message ? `: ${w.message}` : ""} — check the token has Contents: read & write on ${this._s.repo}`,
-          );
-        }
         this._etag = null;
         continue;
       }
+      if (w.branchMissing) {
+        return this._fail(
+          "error",
+          `GitHub refused the write (${w.status})${w.message ? `: ${w.message}` : ""} — check the token has Contents: read & write on ${this._s.repo}`,
+        );
+      }
       return this._fail("error", w.error, w.retryAt);
     }
-    // Every attempt lost a race; keep the ops and try again shortly.
-    this._state = "ok";
-    this._lastError = "The board kept changing on GitHub while saving — retrying";
-    this._refresh();
+    // Every attempt was refused as a conflict. A real race clears up by
+    // itself; one that doesn't (branch protection, a ruleset) must not become
+    // a request storm: report GitHub's words and back off (see _schedule).
+    this._fail("error", `${this._s.path} kept changing on GitHub while saving; will retry${lastConflict ? ` (GitHub: ${lastConflict})` : ""}`);
   }
 }

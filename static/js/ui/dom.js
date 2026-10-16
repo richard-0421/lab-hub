@@ -96,6 +96,17 @@ export class NodeCache {
   }
 }
 
+/**
+ * A named control of `form`. Always use this, never `form.elements.<name>`:
+ * HTMLFormControlsCollection's own members (item, namedItem, length) shadow
+ * controls with those names, so `form.elements.item` is a function.
+ */
+export function formControl(form, name) {
+  const el = form.elements.namedItem(name);
+  if (!el || typeof el.nodeType !== "number") throw new Error(`Lab Hub: form #${form.id || "?"} has no control named "${name}"`);
+  return el;
+}
+
 /** True when keyboard input should go to the event target (typing in a field). */
 export function isTypingTarget(t) {
   if (!t || t.nodeType !== 1) return false;

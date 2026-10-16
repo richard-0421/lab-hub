@@ -8,6 +8,7 @@ import { emptyBoard } from "./board.js";
 import {
   GitHubSource,
   LocalSource,
+  SETTINGS_KEY,
   clearGitHubSettings,
   defaultGitHubSettings,
   detectMode,
@@ -26,13 +27,16 @@ import { initToasts, toast } from "./ui/toast.js";
 import { openSetup } from "./ui/setup.js";
 import { dialogOpen, openDialog } from "./ui/dialog.js";
 import { dayKey, displayUrl, plural, relTime } from "./ui/format.js";
-import { SORT_KEY, getName, pget, setName } from "./ui/prefs.js";
+import { NAME_KEY, SORT_KEY, getName, pget, pset, setName } from "./ui/prefs.js";
+import { forgetGitHub, hasDraft, isKioskHost, isLoopbackHost, personName, unsentOps, versionReloadBlocker } from "./ui/lifecycle.js";
 
 const $ = (id) => document.getElementById(id);
 const root = document.documentElement;
 const phoneMql = window.matchMedia("(max-width: 699px)");
+// Keep in sync with the "slide-over rail" block in style.css.
+const drawerMql = window.matchMedia("(min-width: 700px) and (max-width: 1099px) and (max-height: 820px)");
 const isGithubHost = /\.github\.io$/i.test(location.hostname);
-const isLoopback = (host) => /^(localhost|127(?:\.\d{1,3}){3}|\[::1\]|::1)$/i.test(host) || /\.localhost$/i.test(host);
+const isLoopback = isLoopbackHost;
 
 // ------------------------------------------------------------------ context
 const savedSort = pget(SORT_KEY, "manual");
@@ -46,11 +50,17 @@ const ctx = {
   loaded: false,
   canEdit: false,
   dragging: false,
+  /** The shared Pi display (local mode on loopback): never remembers a person. */
+  kiosk: false,
   changedAt: 0,
   ui: { search: "", assignee: "", sort: ["priority", "due"].includes(savedSort) ? savedSort : "manual", tab: "todo" },
-  /** The person using this browser (remembered), or "". */
+  /** The person using this browser (remembered), or "" — always "" on the shared kiosk. */
   name() {
-    return getName() || (ctx.settings && ctx.settings.clientName) || "";
+    return personName({ kiosk: ctx.kiosk, stored: getName(), clientName: ctx.settings && ctx.settings.clientName });
+  },
+  /** Remember a name typed into a form (personal browsers only, never the kiosk). */
+  rememberName(n) {
+    if (!ctx.kiosk) setName(n);
   },
   /** `by` for ops; undefined lets the source fill in its client name. */
   by() {
@@ -103,7 +113,85 @@ function renderAll() {
   if (!ctx.dragging) tasks.render(); // never re-render the board mid-drag (dnd re-requests on drop)
   requests.render();
   notes.render();
+  renderRailTabs();
   renderFooter();
+  markOverflow();
+}
+
+// --------------------------------------------------------------- side rail
+function setCount(id, n) {
+  const el = $(id);
+  const text = n > 0 ? String(n) : "";
+  if (el.textContent !== text) el.textContent = text;
+  el.hidden = !text;
+}
+
+/** Badges on the compact-layout rail tabs. */
+function renderRailTabs() {
+  setCount("rt-requests", ctx.board.requests.filter((r) => r.status !== "received").length);
+  setCount("rt-notes", ctx.board.notes.length);
+  setCount("rt-calendar", calendar ? calendar.todayCount() : 0);
+}
+
+/**
+ * Mark rail lists that continue below the visible part, so CSS can fade that
+ * edge instead of cutting a row in half with no hint to scroll.
+ */
+function markOverflow(el) {
+  const list = el ? [el] : document.querySelectorAll(".rail-card .card-body");
+  for (const b of list) {
+    const below = b.scrollTop + b.clientHeight < b.scrollHeight - 2;
+    if (b.classList.contains("more-below") !== below) b.classList.toggle("more-below", below);
+  }
+}
+
+function initRail() {
+  for (const b of document.querySelectorAll(".rail-card .card-body")) {
+    b.addEventListener("scroll", () => markOverflow(b), { passive: true });
+  }
+  window.addEventListener("resize", () => markOverflow());
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => markOverflow());
+    for (const b of document.querySelectorAll(".rail-card .card-body")) ro.observe(b);
+  }
+
+  // Slide-over on short landscape screens: the board stays the hero and the
+  // header tabs open one side card at a time.
+  const tabs = Array.from(document.querySelectorAll(".rail-tab"));
+  let opener = null;
+  const show = (name) => {
+    if ((root.dataset.rail || "") === name) return;
+    if (name) root.dataset.rail = name;
+    else delete root.dataset.rail;
+    for (const t of tabs) t.setAttribute("aria-expanded", t.dataset.card === name ? "true" : "false");
+    if (name) {
+      const card = $(`card-${name}`);
+      requestAnimationFrame(() => {
+        try {
+          card.focus({ preventScroll: true });
+        } catch (_) {
+          card.focus();
+        }
+        markOverflow();
+      });
+    }
+  };
+  for (const t of tabs) {
+    t.addEventListener("click", () => {
+      opener = t;
+      show(root.dataset.rail === t.dataset.card ? "" : t.dataset.card);
+    });
+  }
+  $("rail-scrim").addEventListener("click", () => show(""));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !root.dataset.rail || e.defaultPrevented || dialogOpen()) return;
+    show("");
+    if (opener && opener.isConnected) opener.focus();
+  });
+  const onLayout = () => {
+    if (!drawerMql.matches) show("");
+  };
+  if (drawerMql.addEventListener) drawerMql.addEventListener("change", onLayout);
 }
 
 function renderFooter() {
@@ -231,8 +319,24 @@ function openSettings({ firstRun = false } = {}) {
 }
 
 function forgetToken() {
-  clearGitHubSettings();
-  location.reload();
+  // Halt the source first: an in-flight GET/PUT finishing after the clear
+  // would otherwise write the dropped pending ops back into localStorage.
+  const unsub = unsubscribe;
+  unsubscribe = null;
+  forgetGitHub({ source: ctx.source, unsubscribe: unsub, clear: () => clearGitHubSettings(), reload: () => location.reload() });
+}
+
+/** Another tab forgot the token: stop syncing here too (it would re-create the cache) and show setup. */
+function watchOtherTabs() {
+  window.addEventListener("storage", (e) => {
+    if (ctx.mode !== "github" || !ctx.settings || !ctx.settings.token) return;
+    if (e.key !== null && e.key !== SETTINGS_KEY) return;
+    if (e.key === SETTINGS_KEY && e.newValue !== null) return;
+    if (loadGitHubSettings()) return; // cleared and re-saved already
+    const unsub = unsubscribe;
+    unsubscribe = null;
+    forgetGitHub({ source: ctx.source, unsubscribe: unsub, reload: () => location.reload() });
+  });
 }
 
 function confirmForget() {
@@ -302,16 +406,47 @@ function hideWaiting() {
   if (el) el.remove();
 }
 
+// Last pointer / key / text input anywhere on the page (for the version reload).
+let lastInputAt = 0;
+function trackInput() {
+  const mark = () => {
+    lastInputAt = Date.now();
+  };
+  for (const type of ["pointerdown", "keydown", "input"]) document.addEventListener(type, mark, { capture: true, passive: true });
+}
+
 function watchVersion() {
   let base = null;
+  let pendingSince = 0; // when a new version was first seen
+  let retry = 0;
   const check = async () => {
+    clearTimeout(retry);
     try {
       const r = await fetch("api/version", { cache: "no-store", headers: { Accept: "application/json" } });
       if (!r.ok) return;
       const v = (await r.json()).version;
       if (!v) return;
-      if (base === null) base = v;
-      else if (v !== base && !dialogOpen() && !ctx.dragging && !isTypingTarget(document.activeElement)) location.reload();
+      if (base === null) {
+        base = v;
+        return;
+      }
+      if (v === base) {
+        pendingSince = 0;
+        return;
+      }
+      if (!pendingSince) pendingSince = Date.now();
+      const why = versionReloadBlocker({
+        now: Date.now(),
+        pendingSince,
+        lastInputAt,
+        unsent: unsentOps(ctx.source),
+        dragging: ctx.dragging,
+        dialogOpen: dialogOpen(),
+        focusedDraft: hasDraft(document.activeElement),
+      });
+      if (!why) location.reload();
+      // Unsent kiosk edits flush on the next 3 s poll: look again soon.
+      else if (why === "unsent") retry = setTimeout(check, 5000);
     } catch (_) {
       // server restarting — try again next minute
     }
@@ -371,8 +506,11 @@ async function boot() {
   tasks = initTasks(ctx);
   requests = initRequests(ctx);
   notes = initNotes(ctx);
-  calendar = initCalendar(ctx);
+  calendar = initCalendar(ctx, { onRender: () => { renderRailTabs(); markOverflow(); } });
+  initRail();
   bindGlobalKeys();
+  trackInput();
+  watchOtherTabs();
   startTimers();
   phoneMql.addEventListener && phoneMql.addEventListener("change", requestRender);
   $("quickadd").addEventListener("click", () => {
@@ -392,6 +530,8 @@ async function boot() {
   const m = await resolveMode();
   ctx.mode = m.mode;
   root.dataset.mode = m.mode;
+  ctx.kiosk = isKioskHost(m.mode, location.hostname);
+  if (ctx.kiosk) pset(NAME_KEY, ""); // drop a name remembered by an older version of this page
   if (m.mode === "local") {
     ctx.config = m.config;
     setDefaultTheme(m.config.theme);

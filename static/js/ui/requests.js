@@ -1,13 +1,12 @@
 // Item requests card: compact rows (status pill cycles new -> ordered ->
 // received), "Clear received" with undo, an add form and a small editor.
 
-import { h, reconcile, NodeCache, captureFocus, restoreFocus, autoGrow, armButton } from "./dom.js";
+import { h, reconcile, NodeCache, captureFocus, restoreFocus, autoGrow, armButton, formControl } from "./dom.js";
 import { icon } from "./icons.js";
 import { openDialog, field, group, segmented } from "./dialog.js";
 import { cleanString, opAdd, opDelete, opUpdate, rankBetween } from "../board.js";
 import { perform } from "./actions.js";
 import { plural, quote, relTime } from "./format.js";
-import { getName, setName } from "./prefs.js";
 
 const ORDER = { new: 0, ordered: 1, received: 2 };
 const NEXT = { new: "ordered", ordered: "received", received: "new" };
@@ -22,9 +21,9 @@ export function initRequests(ctx) {
   const count = $("req-count");
   const clearBtn = $("clear-received");
   const form = $("req-form");
-  const itemIn = form.elements.item;
-  const qtyIn = form.elements.qty;
-  const byIn = form.elements.by;
+  const itemIn = formControl(form, "item");
+  const qtyIn = formControl(form, "qty");
+  const byIn = formControl(form, "by");
   const cache = new NodeCache();
 
   const find = (id) => ctx.board.requests.find((r) => r.id === id) || null;
@@ -130,7 +129,10 @@ export function initRequests(ctx) {
       itemIn.focus();
       return;
     }
-    const name = setName(byIn.value) || getName();
+    // Exactly what the field says: an emptied field means anonymous, never
+    // "whoever typed a name here last".
+    const name = cleanString(byIn.value, 60);
+    ctx.rememberName(name);
     const first = ctx.board.requests[0];
     const op = opAdd(
       "requests",
@@ -141,6 +143,7 @@ export function initRequests(ctx) {
       if (ok) {
         itemIn.value = "";
         qtyIn.value = "";
+        if (ctx.kiosk) byIn.value = ""; // shared screen: the next person starts blank
         itemIn.focus();
       }
     });
@@ -220,7 +223,7 @@ export function initRequests(ctx) {
     render,
     refreshRelative,
     setDefaults() {
-      if (!byIn.value) byIn.value = getName();
+      if (!byIn.value) byIn.value = ctx.name();
     },
   };
 }

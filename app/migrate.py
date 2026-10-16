@@ -3,13 +3,22 @@ dashboard). See docs/ARCHITECTURE.md section 4 "Legacy migration".
 
 Every legacy row becomes an ``add`` op with a deterministic id
 (``t-legacy-<id>``, ``r-legacy-<id>``, ``n-legacy-<id>``), submitted through
-the store, so importing twice is harmless. ``state/migrated`` records that the
-import ran. The .db file is opened read-only and left in place.
+the store. ``state/migrated`` records that the import ran. The .db file is
+opened read-only and left in place.
+
+The fixed ids make a second import a no-op only for items that still exist;
+an ``add`` brings back an item deleted since. So in GitHub mode the sync
+worker drops these queued adds when the board on GitHub already holds legacy
+items (Store.drop_reimported_legacy_adds): a fresh state/ folder (new clone,
+reinstall) with the same labhub.db then does not resurrect deleted rows. If
+every legacy item has been deleted on GitHub, nothing marks the earlier
+import and the rows are imported again.
 """
 import json
 import logging
 import os
 import pathlib
+import re
 import sqlite3
 from datetime import datetime, timezone
 
@@ -19,6 +28,7 @@ log = logging.getLogger("labhub.migrate")
 
 MARKER = "migrated"
 BY = "legacy import"
+LEGACY_ID_RE = re.compile(r"[trn]-legacy-")  # use with match()
 
 # old display orders (from the old app/main.py)
 _ORDER = {

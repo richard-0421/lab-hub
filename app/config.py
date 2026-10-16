@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 
 log = logging.getLogger("labhub.config")
 
@@ -39,7 +40,15 @@ DEFAULTS = {
     "pages_url": "",
     "state_dir": "state",
     "db_path": "labhub.db",
+    # extra host names browsers may use to reach this server (besides
+    # localhost, IP addresses and this machine's own hostname / <hostname>.local);
+    # a list, or a comma-separated string in LABHUB_ALLOWED_HOSTS. A name
+    # starting with "." allows every subdomain; "*" turns the check off.
+    "allowed_hosts": "",
 }
+
+# keys holding a list of strings
+LIST_KEYS = ("allowed_hosts",)
 
 # legacy key -> current key
 ALIASES = {"subgroup_name": "name"}
@@ -81,12 +90,91 @@ def _normalize_repo(value):
     return s
 
 
-def _derive_pages_url(repo):
-    owner, name = repo.split("/", 1)
+def _derive_pages_url(repo, code_repo=""):
+    """GitHub Pages address for the board in ``repo``. The site is published
+    from the code repo (the one this folder was cloned from); when the board
+    lives in another repo, e.g. a private data repo, the site is pointed at it
+    with ``?repo=``."""
+    site = code_repo or repo
+    owner, name = site.split("/", 1)
     host = "%s.github.io" % owner.lower()
     if name.lower() == host:
-        return "https://%s/" % host
-    return "https://%s/%s/" % (host, name)
+        url = "https://%s/" % host
+    else:
+        url = "https://%s/%s/" % (host, name)
+    if code_repo and code_repo.lower() != repo.lower():
+        url += "?repo=" + repo
+    return url
+
+
+def _git_common_dir(repo_dir):
+    """The git directory holding ``config`` for a checkout (handles a ``.git``
+    file pointing elsewhere and worktrees). None when there is none."""
+    git = os.path.join(repo_dir, ".git")
+    try:
+        if os.path.isfile(git):
+            with open(git, encoding="utf-8") as f:
+                text = f.read()
+            if not text.startswith("gitdir:"):
+                return None
+            git = text[len("gitdir:"):].strip()
+            if not os.path.isabs(git):
+                git = os.path.normpath(os.path.join(repo_dir, git))
+        if not os.path.isdir(git):
+            return None
+        common = os.path.join(git, "commondir")
+        if os.path.isfile(common):
+            with open(common, encoding="utf-8") as f:
+                ref = f.read().strip()
+            if ref:
+                git = ref if os.path.isabs(ref) else os.path.normpath(os.path.join(git, ref))
+    except (OSError, UnicodeDecodeError):
+        return None
+    return git
+
+
+def _github_slug(url):
+    """'owner/name' for a github.com remote URL (https, ssh or scp-like), else ''."""
+    u = url.strip().strip('"').strip()
+    m = re.match(r"^[A-Za-z0-9_.-]+@github\.com:(.+)$", u, re.IGNORECASE)
+    if m:
+        path = m.group(1)
+    else:
+        try:
+            parts = urllib.parse.urlsplit(u)
+        except ValueError:
+            return ""
+        if parts.scheme not in ("https", "http", "ssh", "git") or (parts.hostname or "").lower() != "github.com":
+            return ""
+        path = parts.path
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return path if _REPO_RE.fullmatch(path) else ""
+
+
+def git_origin_repo(repo_dir):
+    """'owner/name' of the checkout's ``origin`` remote on github.com, or ''."""
+    git = _git_common_dir(repo_dir)
+    if not git:
+        return ""
+    try:
+        with open(os.path.join(git, "config"), encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    section = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            section = " ".join(line[1:line.find("]")].split()) if "]" in line else None
+            continue
+        key, sep, value = line.partition("=")
+        if sep and section == 'remote "origin"' and key.strip().lower() == "url":
+            return _github_slug(value)
+    return ""
 
 
 def _read_config_file(path):
@@ -144,8 +232,18 @@ def load_config(base_dir=None, config_path=None, environ=None):
             val = DEFAULTS[key]
         cfg[key] = min(hi, max(lo, val))
 
+    for key in LIST_KEYS:
+        val = cfg[key]
+        if isinstance(val, str):
+            parts = re.split(r"[\s,]+", val)
+        elif isinstance(val, list):
+            parts = [v for v in val if isinstance(v, str)]
+        else:
+            parts = []
+        cfg[key] = [p.strip().lower().rstrip(".") for p in parts if p.strip().rstrip(".")]
+
     for key, default in DEFAULTS.items():
-        if key in INT_KEYS:
+        if key in INT_KEYS or key in LIST_KEYS:
             continue
         val = cfg[key]
         if not isinstance(val, str):
@@ -163,7 +261,7 @@ def load_config(base_dir=None, config_path=None, environ=None):
     cfg["github_path"] = cfg["github_path"].strip("/") or DEFAULTS["github_path"]
     cfg["github_api"] = (cfg["github_api"] or DEFAULTS["github_api"]).rstrip("/")
     if not cfg["pages_url"] and cfg["github_repo"]:
-        cfg["pages_url"] = _derive_pages_url(cfg["github_repo"])
+        cfg["pages_url"] = _derive_pages_url(cfg["github_repo"], git_origin_repo(base_dir))
 
     cfg["state_dir"] = _resolve_path(cfg["state_dir"] or DEFAULTS["state_dir"], base_dir)
     cfg["db_path"] = _resolve_path(cfg["db_path"], base_dir)

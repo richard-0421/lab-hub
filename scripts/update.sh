@@ -7,22 +7,35 @@
 #   journalctl -u lab-hub-update            # what it did
 # It can also be run by hand as the install user: ./scripts/update.sh
 #
+# The service runs a ROOT-OWNED COPY of this file (/usr/local/lib/lab-hub/
+# update.sh, installed by scripts/install-pi.sh) with LABHUB_APP_DIR pointing at
+# the checkout. Root never runs code it has just pulled: a new version of this
+# script, or of the systemd/ units, takes effect only when someone re-runs
+# ./scripts/install-pi.sh on the Pi.
+#
 # What it does (never discards local changes, never creates merge commits):
 #   * as root, all git/pip work runs as LABHUB_USER (default: owner of the repo)
 #   * git fetch origin main
+#   * not on main, fetch failed, ahead of GitHub -> nothing to do, exit 0
 #   * HEAD already == origin/main          -> nothing to do, exit 0
 #   * tracked files modified locally        -> refuse (log), exit 0
-#   * local commits / history diverged      -> log, exit 1
+#   * history diverged                      -> log, exit 1
 #   * git merge --ff-only origin/main
 #   * requirements.txt changed              -> pip install -r into .venv
-#   * systemd/ templates changed (root)     -> re-render the units, daemon-reload
+#   * systemd/ or this script changed       -> log that install-pi.sh must be
+#                                              re-run (never installed from here)
 #   * restart lab-hub.service (root only; otherwise prints the command)
 # The open kiosk page notices the new version and reloads itself.
 set -euo pipefail
 
 log() { printf '[lab-hub-update] %s\n' "$*"; }
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+if [ -n "${LABHUB_APP_DIR:-}" ]; then
+  APP_DIR="$(cd "$LABHUB_APP_DIR" && pwd -P)" || { log "LABHUB_APP_DIR=$LABHUB_APP_DIR: no such folder"; exit 1; }
+else
+  APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+fi
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 VENV_PY="$APP_DIR/.venv/bin/python"
 DEPS_STAMP="$APP_DIR/.venv/.labhub-requirements"
 IS_ROOT=0
@@ -90,43 +103,14 @@ ensure_deps() {
   return 1
 }
 
-sed_escape() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
-
-# Re-render the system units from the systemd/ templates (same substitution
-# as scripts/install-pi.sh). Returns 1 if anything failed.
-refresh_units() {
-  local changed=0 rc=0 name src dest tmp app_esc user_esc
-  app_esc="$(sed_escape "${APP_DIR//[%]/%%}")"
-  user_esc="$(sed_escape "$RUN_USER")"
-  for name in lab-hub.service lab-hub-update.service lab-hub-update.timer; do
-    src="$APP_DIR/systemd/$name"
-    dest="/etc/systemd/system/$name"
-    [ -f "$src" ] || continue
-    tmp="$(mktemp)"
-    if sed -e "s|__USER__|${user_esc}|g" -e "s|__APP_DIR__|${app_esc}|g" "$src" > "$tmp"; then
-      if ! cmp -s "$tmp" "$dest"; then
-        if install -m 644 "$tmp" "$dest"; then
-          log "updated $dest"
-          changed=1
-        else
-          log "could not write $dest"
-          rc=1
-        fi
-      fi
-    else
-      rc=1
-    fi
-    rm -f "$tmp"
-  done
-  if [ "$changed" = 1 ]; then
-    systemctl daemon-reload || rc=1
-  fi
-  return "$rc"
-}
-
 main() {
   pick_user
   cd /
+
+  if [ "$IS_ROOT" = 1 ] && [ "$SELF" = "$APP_DIR/scripts/update.sh" ]; then
+    log "running the checkout's own update.sh as root; re-run ./scripts/install-pi.sh so the"
+    log "  service uses the root-owned copy in /usr/local/lib/lab-hub instead"
+  fi
 
   if ! git_u rev-parse --git-dir >/dev/null 2>&1; then
     log "$APP_DIR is not a git checkout (or $RUN_USER can't read it); cannot update"
@@ -178,9 +162,10 @@ main() {
     exit 1
   fi
 
-  local req_changed=0 units_changed=0
+  local req_changed=0 units_changed=0 updater_changed=0
   git_u diff --quiet "$head" "$remote" -- requirements.txt || req_changed=1
   git_u diff --quiet "$head" "$remote" -- systemd || units_changed=1
+  git_u diff --quiet "$head" "$remote" -- scripts/update.sh || updater_changed=1
 
   log "updating ${head:0:7} -> ${remote:0:7}:"
   git_u log --oneline --no-decorate -n 20 "$head..$remote" | sed 's/^/[lab-hub-update]   /' || true
@@ -197,10 +182,14 @@ main() {
     ensure_deps || rc=1
   fi
 
+  # Root-run pieces are deliberately NOT installed from the pulled code: a push
+  # to main must not be able to run anything as root on this Pi.
+  if [ "$units_changed" = 1 ] || [ "$updater_changed" = 1 ]; then
+    log "systemd/ or scripts/update.sh changed; they take effect only after you run"
+    log "  cd \"$APP_DIR\" && ./scripts/install-pi.sh     (as $RUN_USER, on the Pi)"
+  fi
+
   if [ "$IS_ROOT" = 1 ]; then
-    if [ "$units_changed" = 1 ]; then
-      refresh_units || { log "could not refresh systemd units"; rc=1; }
-    fi
     if systemctl restart lab-hub.service; then
       log "restarted lab-hub.service"
     else
@@ -209,14 +198,11 @@ main() {
     fi
   else
     log "code updated. Load it with: sudo systemctl restart lab-hub"
-    if [ "$units_changed" = 1 ]; then
-      log "systemd templates changed too: re-run ./scripts/install-pi.sh"
-    fi
   fi
   return "$rc"
 }
 
 # Everything runs from main(), so bash has parsed the whole file before the
-# merge above replaces it on disk.
+# merge above replaces it on disk (when it is run from the checkout by hand).
 main "$@"
 exit $?

@@ -266,4 +266,33 @@ describe("LocalSource", () => {
       src.stop();
     }
   });
+
+  test("a reply whose body stalls after the headers times out: offline, ops kept, the queue keeps moving", async () => {
+    const pi = new FakePi({ tasks: [{ id: "t-a", title: "A" }] });
+    const realFetch = pi.fetch;
+    let stall = false;
+    const fetchImpl = async (url, init) => {
+      if (stall && (init.method || "GET") === "POST") {
+        await realFetch(url, init); // the Pi applies it, but the reply body never arrives
+        return new Response(new ReadableStream({ start() {} }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return realFetch(url, init);
+    };
+    const src = makeSource(pi, { fetchImpl, timeoutMs: 60 });
+    try {
+      await src.start();
+      stall = true;
+      const r = await Promise.race([src.submit(addTask("t-b", "B", { rank: 1 })).then(() => "settled"), sleep(2000).then(() => "hung")]);
+      assert.equal(r, "settled");
+      assert.equal(src.sync.state, "offline");
+      assert.equal(src.sync.pending, 1);
+      stall = false;
+      const sync = await src.syncNow();
+      assert.equal(sync.pending, 0);
+      assert.deepEqual(titles(src.board), ["A", "B"]);
+      assert.deepEqual(titles(pi.board), ["A", "B"], "the re-sent add is a no-op on the Pi");
+    } finally {
+      src.stop();
+    }
+  });
 });

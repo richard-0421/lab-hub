@@ -90,12 +90,17 @@ export function parseDue(expr, today = new Date()) {
   return "";
 }
 
+// Punctuation that ends a sentence or a list item ("#bio," "@mei:" "^fri.").
+const TRAILING_PUNCT_RE = /[,.;:!?)\]]+$/u;
+
 /**
  * Parse quick-add text. Tokens are removed from the title:
  *   @name            -> assignee ("_" becomes a space; last one wins)
  *   !high !h !! !urgent / !low !l / !normal !n -> priority (null if absent)
  *   #tag             -> tags (lower-case, de-duplicated; must contain a letter)
  *   due:X  ^X        -> due "YYYY-MM-DD" (local); unparseable tokens stay in the title
+ * Trailing punctuation after a token (",.;:!?)]"; "!" not for priorities) is
+ * dropped along with it; a word that still isn't a token stays as typed.
  * Returns {title, assignee, priority, tags, due}.
  */
 export function parseQuickAdd(text, today = new Date()) {
@@ -106,7 +111,8 @@ export function parseQuickAdd(text, today = new Date()) {
   let due = "";
   const tags = [];
   for (const w of words) {
-    let m = /^@([\p{L}\p{N}._-]+)$/u.exec(w);
+    const bare = w.replace(TRAILING_PUNCT_RE, "");
+    let m = /^@([\p{L}\p{N}._-]+)$/u.exec(bare);
     if (m) {
       const name = m[1].replace(/\.+$/, "").replace(/_/g, " ").trim();
       if (name) {
@@ -115,11 +121,12 @@ export function parseQuickAdd(text, today = new Date()) {
       }
     }
     const lower = w.toLowerCase();
-    if (Object.prototype.hasOwnProperty.call(PRIORITY_TOKENS, lower)) {
-      priority = PRIORITY_TOKENS[lower];
+    const plain = lower.replace(/[,.;:?)\]]+$/u, ""); // "!high," (keeps the "!"s of "!!")
+    if (Object.prototype.hasOwnProperty.call(PRIORITY_TOKENS, plain)) {
+      priority = PRIORITY_TOKENS[plain];
       continue;
     }
-    m = /^#([^\s#]\S*)$/u.exec(w);
+    m = /^#([^\s#]\S*)$/u.exec(bare);
     if (m && /\p{L}/u.test(m[1])) {
       const tag = Array.from(m[1].toLowerCase()).slice(0, TAG_LEN).join("");
       if (!tags.includes(tag) && tags.length < MAX_TAGS) tags.push(tag);
@@ -127,7 +134,7 @@ export function parseQuickAdd(text, today = new Date()) {
     }
     m = /^(?:due:|\^)(.+)$/i.exec(w);
     if (m) {
-      const d = parseDue(m[1], today);
+      const d = parseDue(m[1], today) || parseDue(m[1].replace(TRAILING_PUNCT_RE, ""), today);
       if (d) {
         due = d;
         continue;

@@ -1,4 +1,6 @@
 """app/store.py persistence + app/github_sync.py against tests/mock_github.py."""
+import contextlib
+import errno
 import json
 import logging
 import os
@@ -8,14 +10,16 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from app import board as B  # noqa: E402
-from app.github_sync import SyncWorker  # noqa: E402
-from app.store import OpError, Store  # noqa: E402
+from app import store as S  # noqa: E402
+from app.github_sync import SyncWorker, git_blob_sha  # noqa: E402
+from app.store import OpError, Store, StoreUnavailable  # noqa: E402
 from tests.mock_github import MockGitHub  # noqa: E402
 
 REPO = "richard-0417/lab-hub"
@@ -37,6 +41,28 @@ def update(tid, coll="tasks", **changes):
 
 def titles(board):
     return sorted(t["title"] for t in board["tasks"])
+
+
+def delete(tid, coll="tasks"):
+    return {"op": "delete", "coll": coll, "id": tid, "ts": TS, "by": "Richard"}
+
+
+def board_of(*tasks):
+    return B.normalize_board({"tasks": list(tasks)})
+
+
+@contextlib.contextmanager
+def failing_writes(*names):
+    """Writes of these state files fail like a full SD card (ENOSPC)."""
+    real = S.atomic_write
+
+    def write(path, data):
+        if os.path.basename(path) in names:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(path, data)
+
+    with mock.patch.object(S, "atomic_write", write):
+        yield
 
 
 def wait_until(pred, timeout=5.0, step=0.02):
@@ -207,6 +233,199 @@ class StoreTests(TempDirTest):
         self.assertEqual(s.pending(), [])
         self.assertEqual(titles(s.base()), ["A"])
 
+    def test_queued_ops_are_normalized_and_stored_compactly(self):
+        s = self.gh_store()
+        op = add_task("t-1", "  " + "A" * 1000, junk="x" * 5000, notes=["not text"])
+        op["ts"] = "2026-10-16T16:00:00.123456789+02:00"
+        edit = update("t-1", assignee="m" * 500, tags=["#Bio", "bio", " x "], rank=2.0)
+        s.submit([op, edit])
+        added, changed = s.pending()
+        self.assertNotIn("junk", added["item"])
+        self.assertEqual(len(added["item"]["title"]), 300)
+        self.assertEqual(added["item"]["notes"], "")
+        self.assertEqual(added["ts"], "2026-10-16T14:00:00Z")
+        self.assertEqual(changed["set"], {"assignee": "m" * 60, "tags": ["bio", "x"], "rank": 2})
+        self.assertEqual(set(changed), {"op", "coll", "id", "set", "ts", "by"})
+        with open(os.path.join(self.state, "pending.json"), "rb") as f:
+            raw = f.read()
+        self.assertLess(len(raw), 1200)
+        self.assertNotIn(b"\n", raw)
+        # same view as applying the raw ops
+        self.assertEqual(s.view(), B.apply_ops(B.empty_board(), [op, edit]))
+
+    def test_full_collection_rejects_adds(self):
+        os.makedirs(self.state)
+        with open(os.path.join(self.state, "remote.json"), "wb") as f:
+            f.write(B.serialize_board_bytes(board_of(*[{"id": "t%04d" % i, "title": "x", "rank": i}
+                                                       for i in range(B.MAX_ITEMS)])))
+        for s in (self.local_store(), self.gh_store()):
+            with self.assertRaises(OpError) as cm:
+                s.submit([add_task("t-new", "New", -1)])
+            self.assertEqual(cm.exception.index, 0)
+            self.assertIn("board full", cm.exception.message)
+            with self.assertRaises(OpError) as cm:
+                s.submit([delete("t0001"), add_task("t-new", "New", -1), add_task("t-new2", "Too many")])
+            self.assertEqual(cm.exception.index, 2)
+            self.assertEqual(len(s.view()["tasks"]), B.MAX_ITEMS)
+            # re-adding an existing id is still fine, and a delete makes room
+            s.submit([add_task("t0005", "dup")])
+            res = s.submit([delete("t0001"), add_task("t-new", "New", -1)])
+            self.assertEqual(res["board"]["tasks"][0]["id"], "t-new")
+            self.assertEqual(len(res["board"]["tasks"]), B.MAX_ITEMS)
+
+    def test_pending_queue_is_capped(self):
+        s = self.gh_store()
+        with mock.patch.object(S, "MAX_PENDING", 3):
+            s.submit([add_task("t-1", "A"), add_task("t-2", "B")])
+            rev = s.rev
+            with self.assertRaises(StoreUnavailable):
+                s.submit([add_task("t-3", "C"), add_task("t-4", "D")])
+        self.assertEqual(len(s.pending()), 2)
+        self.assertEqual(s.rev, rev)
+        self.assertEqual(titles(s.view()), ["A", "B"])
+
+    def test_unsaved_change_is_refused_not_acknowledged(self):
+        g = self.gh_store()
+        g.submit([add_task("t-1", "Kept")])
+        rev = g.rev
+        with failing_writes("pending.json"):
+            with self.assertRaises(StoreUnavailable) as cm:
+                g.submit([add_task("t-2", "Lost?")])
+        self.assertIn("disk full", cm.exception.message)
+        self.assertEqual(titles(g.view()), ["Kept"])
+        self.assertEqual(len(g.pending()), 1)
+        self.assertEqual(g.rev, rev)
+        shutil.rmtree(self.state)
+        s = self.local_store()
+        s.submit([add_task("t-1", "Kept")])
+        with failing_writes("remote.json"):
+            with self.assertRaises(StoreUnavailable):
+                s.submit([add_task("t-2", "Lost?")])
+        self.assertEqual(titles(s.view()), ["Kept"])
+        self.assertEqual(titles(self.local_store().view()), ["Kept"])
+
+    def test_board_write_failure_never_leaves_an_etag_for_a_stale_board(self):
+        g = self.gh_store()
+        g.on_remote_fetched(board_of({"id": "t-a", "title": "Alpha"}), "s1", '"s1"')
+        newer = board_of({"id": "t-a", "title": "Alpha"}, {"id": "t-web", "title": "Web", "rank": 1})
+        with failing_writes("remote.json"):
+            g.on_remote_fetched(newer, "s2", '"s2"')
+        self.assertEqual(titles(g.view()), ["Alpha", "Web"])
+        with open(os.path.join(self.state, "sync.json")) as f:
+            self.assertIsNone(json.load(f)["etag"])
+        # a restart now downloads the board instead of trusting a 304
+        self.assertIsNone(self.gh_store().fetch_params()["etag"])
+        # the next fetch retries the write although the board did not change
+        g.on_remote_fetched(newer, "s2", '"s2"')
+        again = self.gh_store()
+        self.assertEqual(titles(again.base()), ["Alpha", "Web"])
+        self.assertEqual(again.fetch_params()["etag"], '"s2"')
+
+    def test_missing_board_file_drops_the_etag(self):
+        g = self.gh_store()
+        g.on_remote_fetched(board_of({"id": "t-a", "title": "Alpha"}), "s1", '"s1"')
+        self.assertEqual(self.gh_store().fetch_params()["etag"], '"s1"')
+        os.remove(os.path.join(self.state, "remote.json"))
+        self.assertIsNone(self.gh_store().fetch_params()["etag"])
+
+
+class ModeSwitchTests(TempDirTest):
+    """GitHub sync switched off (bad config.json, token removed ...) and on again."""
+
+    def seed(self, store, *tasks, sha="s1"):
+        store.on_remote_fetched(board_of(*tasks), sha, '"%s"' % sha)
+
+    ABCD = ({"id": "t-a", "title": "Alpha", "rank": 1}, {"id": "t-b", "title": "Beta", "rank": 2},
+            {"id": "t-c", "title": "Gamma", "rank": 3}, {"id": "t-d", "title": "Delta", "rank": 4})
+
+    def test_changes_made_around_a_local_only_spell_are_replayed_exactly(self):
+        g = self.gh_store()
+        self.seed(g, *self.ABCD)
+        # offline: complete Alpha, delete Beta (queued)
+        g.submit([update("t-a", status="done", done_at=TS), delete("t-b")])
+        # the service restarts without the token: local-only
+        s = self.local_store()
+        self.assertEqual(titles(s.view()), ["Alpha", "Delta", "Gamma"])
+        self.assertEqual(s.pending(), [])
+        self.assertTrue(os.path.exists(os.path.join(self.state, "snapshot.json")))
+        s.submit([update("t-d", title="Delta (kiosk)")])
+        self.assertEqual(titles(self.local_store().view()), ["Alpha", "Delta (kiosk)", "Gamma"])
+        # the token is back
+        g2 = self.gh_store()
+        queued = g2.pending()
+        self.assertEqual(sorted((op["op"], op.get("id")) for op in queued),
+                         [("delete", "t-b"), ("update", "t-a"), ("update", "t-d")])
+        changes = {op["id"]: op["set"] for op in queued if op["op"] == "update"}
+        self.assertEqual(changes["t-a"], {"status": "done", "done_at": TS})
+        self.assertEqual(changes["t-d"], {"title": "Delta (kiosk)"})
+        self.assertFalse(os.path.exists(os.path.join(self.state, "snapshot.json")))
+        # meanwhile on GitHub: Gamma deleted, Delta's priority raised
+        self.seed(g2, self.ABCD[0], self.ABCD[1], dict(self.ABCD[3], priority="high"), sha="s2")
+        view = {t["id"]: t for t in g2.view()["tasks"]}
+        self.assertEqual(sorted(view), ["t-a", "t-d"])  # Beta stays deleted, Gamma stays gone
+        self.assertEqual((view["t-a"]["status"], view["t-a"]["done_at"]), ("done", TS))
+        self.assertEqual((view["t-d"]["title"], view["t-d"]["priority"]), ("Delta (kiosk)", "high"))
+        # another restart queues nothing twice
+        self.assertEqual(len(self.gh_store().pending()), 3)
+
+    def test_remote_delete_during_local_only_spell_is_not_undone(self):
+        g = self.gh_store()
+        self.seed(g, *self.ABCD)
+        self.local_store()
+        g2 = self.gh_store()
+        self.assertEqual(g2.pending(), [])
+        self.seed(g2, *self.ABCD[:3], sha="s2")  # Delta deleted on the web meanwhile
+        self.assertEqual(titles(g2.view()), ["Alpha", "Beta", "Gamma"])
+
+    def test_other_target_gets_the_board_as_new_items(self):
+        g = self.gh_store()
+        self.seed(g, self.ABCD[0])
+        self.local_store()
+        with self.assertLogs("labhub.store", level="WARNING") as logs:
+            g2 = self.gh_store(repo="richard-0417/another-board")
+        self.assertEqual([(op["op"], op["item"]["id"]) for op in g2.pending()], [("add", "t-a")])
+        self.assertEqual(g2.base(), B.empty_board())
+        self.assertTrue(any("not where this board was last synced" in m for m in logs.output), logs.output)
+
+    def test_requeue_writes_the_queue_before_emptying_the_board(self):
+        s = self.local_store()
+        s.submit([add_task("t-%d" % i, "T%d" % i, i) for i in range(5)])
+        # first GitHub start: the queue can't be saved (full disk / power cut)
+        with failing_writes("pending.json"):
+            g = self.gh_store()
+            self.assertEqual(len(g.view()["tasks"]), 5)
+            # ... and a fetch must not overwrite the only copy of the board
+            g.on_remote_fetched(board_of({"id": "t-web", "title": "Web"}), "s1", '"s1"')
+        g = self.gh_store()
+        self.assertEqual(len(g.pending()), 5)
+        self.assertEqual(len(g.view()["tasks"]), 5)
+
+    def test_requeue_crash_between_files_keeps_every_item(self):
+        s = self.local_store()
+        s.submit([add_task("t-%d" % i, "T%d" % i, i) for i in range(5)])
+        # dies after pending.json, before remote.json / sync.json
+        with failing_writes("remote.json", "sync.json"):
+            self.gh_store()
+        self.assertEqual(len(self.gh_store().view()["tasks"]), 5)
+        shutil.rmtree(self.state)
+        s = self.local_store()
+        s.submit([add_task("t-%d" % i, "T%d" % i, i) for i in range(5)])
+        # dies after remote.json, before sync.json
+        with failing_writes("sync.json"):
+            self.gh_store()
+        g = self.gh_store()
+        self.assertEqual(len(g.view()["tasks"]), 5)
+        self.assertEqual(len(g.pending()), 5)
+
+    def test_fold_crash_does_not_replay_old_ops_over_newer_edits(self):
+        g = self.gh_store()
+        self.seed(g, self.ABCD[0])
+        g.submit([update("t-a", title="Alpha 2")])
+        with failing_writes("pending.json"):
+            s = self.local_store()  # folded, but the stale queue file stays
+        s.submit([update("t-a", title="Alpha 3")])
+        self.assertEqual(titles(self.local_store().view()), ["Alpha 3"])
+
 
 # --------------------------------------------------------------------------- #
 # sync against the mock
@@ -226,12 +445,18 @@ class SyncTests(TempDirTest):
     def start(self, token=TOKEN, repo=REPO, interval=15, **mock_kw):
         self.mock = MockGitHub(repo=REPO, token=TOKEN, **mock_kw).start()
         self.store = self.gh_store(api=self.mock.url, repo=repo)
-        cfg = {
+        self.cfg = {
             "github_repo": repo, "github_branch": "data", "github_path": "board.json",
             "github_token": token, "github_api": self.mock.url, "client_name": "lab-pi",
             "sync_interval": interval,
         }
-        self.worker = SyncWorker(self.store, cfg)
+        self.worker = SyncWorker(self.store, self.cfg)
+        return self.store, self.worker
+
+    def restart(self):
+        """A new process: store and worker rebuilt from state/."""
+        self.store = self.gh_store(api=self.mock.url, repo=self.cfg["github_repo"])
+        self.worker = SyncWorker(self.store, self.cfg)
         return self.store, self.worker
 
     def remote(self):
@@ -581,6 +806,147 @@ class SyncTests(TempDirTest):
         self.assertEqual(len(self.remote()["tasks"]), 5)
         self.assertEqual(len([p for p in self.puts() if p["status"] in (200, 201)]), 1)
         self.assertEqual([p for p in self.puts() if p["status"] == 409], [])
+
+    # ---- pushes whose answer is lost ------------------------------------ #
+    def web_edit_after(self):
+        """The web deletes "Order tips" and renames Beta."""
+        web = self.remote()
+        web["tasks"] = [t for t in web["tasks"] if t["id"] != "t-a"]
+        web["tasks"][0]["title"] = "Beta (web)"
+        self.mock.set_file_text("data", "board.json", json.dumps(web))
+
+    def lab_pi_pushes(self, text):
+        return [c for c in self.mock.commits("data") if c["message"].startswith("lab-pi") and text in c["message"]]
+
+    def test_lost_put_response_is_recognised_at_once(self):
+        store, worker = self.start()
+        store.submit([add_task("t-b", "Beta", 2)])
+        worker.sync_once()
+        store.submit([add_task("t-a", "Order tips", 1), update("t-b", title="Beta v2")])
+        self.mock.drop_response_next("PUT", "/contents/")
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "ok", status)
+        self.assertEqual(status["pending"], 0)
+        self.assertIsNone(store.inflight())
+        self.assertEqual(titles(store.view()), ["Beta v2", "Order tips"])
+        self.web_edit_after()
+        self.mock.clear_log()
+        self.assertEqual(worker.sync_once()["state"], "ok")
+        self.assertEqual(self.mock.count("PUT"), 0)
+        self.assertEqual(titles(self.remote()), ["Beta (web)"])
+        self.assertEqual(titles(store.view()), ["Beta (web)"])
+        self.assertEqual(len(self.lab_pi_pushes("Order tips")), 1)
+
+    def test_lost_put_response_is_found_in_history_after_a_restart(self):
+        store, worker = self.start()
+        store.submit([add_task("t-b", "Beta", 2)])
+        worker.sync_once()
+        store.submit([add_task("t-a", "Order tips", 1), update("t-b", title="Beta v2")])
+        self.mock.drop_response_next("PUT", "/contents/")
+        # the check right after the lost answer fails too
+        self.mock.on_next("PUT", lambda: self.mock.fail_next(502, "Server Error", method="GET"), "/contents/")
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "offline", status)
+        self.assertEqual(status["pending"], 2)
+        self.assertIsNotNone(store.inflight())
+        self.web_edit_after()  # others edit on top of the committed push
+        store, worker = self.restart()
+        self.mock.clear_log()
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "ok", status)
+        self.assertEqual(status["pending"], 0)
+        self.assertEqual(self.mock.count("PUT"), 0)
+        self.assertEqual(self.mock.count("GET", "/commits"), 1)
+        self.assertEqual(titles(self.remote()), ["Beta (web)"])
+        self.assertEqual(titles(store.view()), ["Beta (web)"])
+        self.assertEqual(len(self.lab_pi_pushes("Order tips")), 1)
+
+    def test_put_that_did_not_land_is_sent_again(self):
+        store, worker = self.start()
+        worker.sync_once()
+        store.submit([add_task("t-1", "A")])
+        self.mock.fail_next(502, "Server Error", method="PUT")  # answered before committing
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(status["pending"], 1)
+        self.assertIsNone(store.inflight())
+        self.assertEqual(worker.sync_once()["state"], "ok")
+        self.assertEqual(titles(self.remote()), ["A"])
+        self.assertEqual(len(self.lab_pi_pushes("“A”")), 1)
+
+    def test_lost_create_put_is_recognised(self):
+        store, worker = self.start()
+        store.submit([add_task("t-1", "First")])
+        self.mock.drop_response_next("PUT", "/contents/")
+        self.mock.on_next("PUT", lambda: self.mock.fail_next(502, "Server Error", method="GET"), "/contents/")
+        self.assertEqual(worker.sync_once()["state"], "offline")
+        self.assertIsNone(store.inflight()["parent"])
+        store, worker = self.restart()
+        self.mock.clear_log()
+        self.assertEqual(worker.sync_once()["pending"], 0)
+        self.assertEqual(self.mock.count("PUT"), 0)
+        self.assertEqual(titles(self.remote()), ["First"])
+
+    def test_inflight_record_matches_the_bytes_sent(self):
+        store, worker = self.start()
+        store.submit([add_task("t-1", "A")])
+        seen = {}
+        self.mock.on_next("PUT", lambda: seen.update(store.inflight()), "/contents/")
+        worker.sync_once()
+        text = self.mock.get_file_text("data", "board.json").encode("utf-8")
+        self.assertEqual(seen["expected"], git_blob_sha(text))
+        self.assertEqual(seen["k"], 1)
+        self.assertIsNone(store.inflight())
+
+    # ---- state files ------------------------------------------------------ #
+    def test_board_write_failure_cannot_leave_a_stale_base_behind(self):
+        store, worker = self.start()
+        store.submit([add_task("t-a", "Alpha")])
+        worker.sync_once()
+        worker.sync_once()  # GET 200: etag stored
+        web = self.remote()
+        web["tasks"].append({"id": "t-web", "title": "Web", "rank": 5})
+        self.mock.set_file_text("data", "board.json", json.dumps(web))
+        with failing_writes("remote.json"):
+            worker.sync_once()
+        store, worker = self.restart()
+        self.mock.clear_log()
+        worker.sync_once()
+        self.assertEqual([(r["method"], r["status"]) for r in self.mock.requests], [("GET", 200)])
+        self.assertEqual(titles(store.view()), ["Alpha", "Web"])
+        store.submit([add_task("t-pi", "Pi", 6)])
+        worker.sync_once()
+        self.assertEqual(titles(self.remote()), ["Alpha", "Pi", "Web"])
+
+    def test_github_local_github_round_trip_keeps_every_edit(self):
+        store, worker = self.start()
+        store.submit([add_task("t-a", "Alpha", 1), add_task("t-b", "Beta", 2), add_task("t-c", "Gamma", 3)])
+        worker.sync_once()
+        worker.sync_once()
+        self.mock.set_offline(True)
+        store.submit([update("t-a", status="done", done_at=TS), delete("t-b")])
+        self.assertEqual(worker.sync_once()["state"], "offline")
+        self.mock.set_offline(False)
+        web = self.remote()
+        web["tasks"] = [t for t in web["tasks"] if t["id"] != "t-c"]
+        self.mock.set_file_text("data", "board.json", json.dumps(web))
+        local = self.local_store()  # e.g. a typo in config.json
+        local.submit([add_task("t-k", "Kiosk", 9)])
+        store, worker = self.restart()  # config fixed
+        self.assertEqual(worker.sync_once()["state"], "ok")
+        remote = {t["id"]: t for t in self.remote()["tasks"]}
+        self.assertEqual(sorted(remote), ["t-a", "t-k"])
+        self.assertEqual(remote["t-a"]["status"], "done")
+        self.assertEqual(store.view(), B.normalize_board(self.remote()))
+
+    def test_over_cap_remote_is_reported(self):
+        store, worker = self.start()
+        doc = {"tasks": [{"id": "t%04d" % i, "title": "x", "rank": i} for i in range(B.MAX_ITEMS + 1)]}
+        self.mock.set_file_text("data", "board.json", json.dumps(doc))
+        with self.assertLogs("labhub.sync", level="WARNING") as logs:
+            worker.sync_once()
+        self.assertTrue(any("more than 2000 items in tasks" in m for m in logs.output), logs.output)
+        self.assertEqual(len(store.view()["tasks"]), B.MAX_ITEMS)
 
 
 if __name__ == "__main__":

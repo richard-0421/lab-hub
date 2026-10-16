@@ -50,6 +50,12 @@
       </div>
 
       <div class="top-actions">
+        <!-- Small landscape screens (the 800x480 Pi touchscreen): the side cards open as a slide-over. -->
+        <div class="rail-tabs" id="rail-tabs" role="group" aria-label="Lab info">
+          <button type="button" class="rail-tab" data-card="calendar" aria-controls="card-calendar" aria-expanded="false" title="Today &amp; upcoming"><span data-icon="calendar"></span><span class="rail-tab-label">Calendar</span><span class="rail-tab-count" id="rt-calendar" hidden></span></button>
+          <button type="button" class="rail-tab" data-card="requests" aria-controls="card-requests" aria-expanded="false" title="Item requests"><span data-icon="box"></span><span class="rail-tab-label">Requests</span><span class="rail-tab-count" id="rt-requests" hidden></span></button>
+          <button type="button" class="rail-tab" data-card="notes" aria-controls="card-notes" aria-expanded="false" title="Notes"><span data-icon="note"></span><span class="rail-tab-label">Notes</span><span class="rail-tab-count" id="rt-notes" hidden></span></button>
+        </div>
         <div class="sync-wrap" id="sync-wrap">
           <button type="button" class="sync-pill tone-muted" id="sync-pill" aria-haspopup="dialog" aria-expanded="false" aria-controls="sync-pop">
             <span class="sync-ico" id="sync-ico"></span><span class="sync-text" id="sync-text">Connecting…</span>
@@ -136,7 +142,7 @@
       </section>
 
       <aside class="rail" id="rail" aria-label="Lab info">
-        <section class="panel rail-card" id="card-calendar" aria-labelledby="cal-title">
+        <section class="panel rail-card" id="card-calendar" aria-labelledby="cal-title" tabindex="-1">
           <header class="card-head">
             <span class="card-ico ico-cal"><span data-icon="calendar"></span></span>
             <h2 class="card-title" id="cal-title">Today &amp; upcoming</h2>
@@ -145,7 +151,7 @@
           <div class="card-body" id="cal-body"><div class="skeleton-list"><div class="sk"></div><div class="sk"></div><div class="sk"></div></div></div>
         </section>
 
-        <section class="panel rail-card" id="card-requests" aria-labelledby="req-title">
+        <section class="panel rail-card" id="card-requests" aria-labelledby="req-title" tabindex="-1">
           <header class="card-head">
             <span class="card-ico ico-req"><span data-icon="box"></span></span>
             <h2 class="card-title" id="req-title">Item requests</h2>
@@ -165,7 +171,7 @@
           </form>
         </section>
 
-        <section class="panel rail-card" id="card-notes" aria-labelledby="notes-title">
+        <section class="panel rail-card" id="card-notes" aria-labelledby="notes-title" tabindex="-1">
           <header class="card-head">
             <span class="card-ico ico-note"><span data-icon="note"></span></span>
             <h2 class="card-title" id="notes-title">Notes</h2>
@@ -185,6 +191,7 @@
           </form>
         </section>
       </aside>
+      <div class="rail-scrim" id="rail-scrim" aria-hidden="true"></div>
     </main>
 
     <!-- ================================================================ footer -->

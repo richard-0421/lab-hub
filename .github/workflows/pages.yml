@@ -2,11 +2,17 @@
 #   https://richard-0417.github.io/lab-hub/
 #
 # Runs on pushes to main that touch static/ or this file, or by hand from the
-# Actions tab ("Run workflow"). Board data lives on the `data` branch, so the
-# commits the Pi and browsers make there never trigger a deploy.
+# Actions tab ("Run workflow"). Board data lives in a separate data repo
+# (richard-0417/lab-hub-data), so the commits the Pi and browsers make there
+# never trigger a deploy.
 #
 # One-time setup: repo Settings -> Pages -> Build and deployment ->
 # Source: "GitHub Actions".
+#
+# Action majors that run on the Node 24 runtime (Node 20 is gone from the
+# hosted runners). upload-pages-artifact and deploy-pages are upgraded
+# together so the artifact format matches; v5 of the upload action leaves out
+# dotfiles, and static/ has none.
 name: Deploy to GitHub Pages
 
 on:
@@ -37,19 +43,19 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Sanity check static/
         run: test -f static/index.html
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload static/ as the site
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: static
 
       - name: Deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

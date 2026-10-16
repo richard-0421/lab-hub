@@ -4,10 +4,20 @@ import { h } from "./dom.js";
 import { icon } from "./icons.js";
 
 let openCount = 0;
+let lastClosedAt = 0;
 
 /** True while any Lab Hub dialog is open. */
 export function dialogOpen() {
   return openCount > 0;
+}
+
+/**
+ * Milliseconds since a dialog last closed (Infinity if none has). Closing a
+ * <dialog> hands focus back to the element that opened it, so a key typed for
+ * the dialog (Enter in a title, then a reflexive Backspace) can land there.
+ */
+export function msSinceDialogClose(now = Date.now()) {
+  return lastClosedAt ? now - lastClosedAt : Infinity;
 }
 
 /**
@@ -72,6 +82,7 @@ export function openDialog({ title, subtitle = "", body = [], footer = [], class
   });
   dialog.addEventListener("close", () => {
     closed = true;
+    lastClosedAt = Date.now();
     openCount = Math.max(0, openCount - 1);
     dialog.remove();
     if (onClose) onClose();

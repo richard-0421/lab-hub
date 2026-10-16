@@ -99,8 +99,69 @@ export function initHeader(ctx, { onSyncNow, onSettings, onForget, onTheme }) {
     els.pillText.textContent = info.text;
   }
 
-  function row(label, value) {
-    return h("div", { class: "pop-row" }, h("dt", { text: label }), h("dd", {}, value));
+  // The popover is built once per open (and again only if its set of buttons
+  // changes); later renders — every sync emission and the 10 s refresh —
+  // update text and attributes in place, so a focused button or a click in
+  // progress is never swept away.
+  let pop = null;
+
+  function row(label) {
+    const dd = h("dd", {});
+    return { el: h("div", { class: "pop-row" }, h("dt", { text: label }), dd), dd };
+  }
+
+  function setText(el, text) {
+    if (el.textContent !== text) el.textContent = text;
+  }
+
+  function buildPop(local, hasToken) {
+    const p = { key: `${local}|${hasToken}` };
+    p.ico = h("span", { class: "pop-ico" });
+    p.title = h("div", { class: "pop-title" });
+    p.sub = h("div", { class: "pop-sub", hidden: true });
+    p.head = h("div", { class: "pop-head" }, p.ico, h("div", {}, p.title, p.sub));
+    p.mode = row("Mode");
+    p.file = row("Board file");
+    p.lastSync = row("Last sync");
+    p.lastPush = row("Last push");
+    p.waiting = row("Waiting");
+    p.errText = h("span");
+    p.err = h("div", { class: "pop-error", role: "note", hidden: true }, icon("alert"), p.errText);
+    p.syncIco = h("span", { class: "btn-ico" });
+    p.syncLabel = h("span");
+    p.syncBtn = h("button", { type: "button", class: "btn btn-primary sm", "data-act": "sync" }, p.syncIco, p.syncLabel);
+    p.syncBtn.addEventListener("click", async () => {
+      // aria-disabled (not disabled) while busy: disabling the focused button
+      // would drop keyboard focus to <body>.
+      if (busy || p.syncBtn.disabled) return;
+      busy = true;
+      renderPop();
+      try {
+        await onSyncNow();
+      } catch (e) {
+        toast({ message: (e && e.message) || "Sync failed", kind: "error" });
+      } finally {
+        busy = false;
+        renderPop();
+      }
+    });
+    const buttons = [p.syncBtn];
+    if (!local) {
+      buttons.push(h("button", { type: "button", class: "btn btn-ghost sm", "data-act": "settings", onClick: () => { closePop(); onSettings(); } }, icon("settings"), "Settings"));
+      if (hasToken) {
+        buttons.push(h("button", { type: "button", class: "btn btn-ghost sm danger-text", "data-act": "forget", onClick: () => { closePop(); onForget(); } }, icon("key"), "Forget token"));
+      }
+    }
+    p.nodes = [
+      p.head,
+      h("dl", { class: "pop-rows" }, p.mode.el, p.file.el, p.lastSync.el, p.lastPush.el, p.waiting.el),
+      p.err,
+      h("div", { class: "pop-actions" }, buttons),
+    ];
+    p.icoKey = "";
+    p.fileKey = null;
+    p.busyKey = null;
+    return p;
   }
 
   function renderPop() {
@@ -108,6 +169,7 @@ export function initHeader(ctx, { onSyncNow, onSettings, onForget, onTheme }) {
     const s = ctx.sync || {};
     const info = pillInfo(s);
     const local = ctx.mode === "local";
+    const hasToken = !local && !!(ctx.settings && ctx.settings.token);
     const gh = local ? (ctx.config && ctx.config.github) || {} : {};
     const repo = s.repo || gh.repo || "";
     const branch = s.branch || gh.branch || "";
@@ -129,62 +191,54 @@ export function initHeader(ctx, { onSyncNow, onSettings, onForget, onTheme }) {
             ? "Edits are kept safely on this device and will sync automatically when the connection is back."
             : "";
 
-    const where = h("span", { class: "pop-faint pop-block", text: `${branch} · ${path}` });
-    const fileLink = fileUrl
-      ? [h("a", { href: fileUrl, target: "_blank", rel: "noopener noreferrer", class: "pop-link" }, icon("github"), h("span", { text: repo })), where]
-      : repo
-        ? [h("span", { class: "pop-block", text: repo }), where]
-        : "—";
-
-    const syncBtn = h(
-      "button",
-      { type: "button", class: "btn btn-primary sm", disabled: busy || s.state === "off" },
-      busy ? spinner() : icon("refresh"),
-      busy ? "Syncing…" : "Sync now",
-    );
-    syncBtn.addEventListener("click", async () => {
-      busy = true;
-      renderPop();
-      try {
-        await onSyncNow();
-      } catch (e) {
-        toast({ message: (e && e.message) || "Sync failed", kind: "error" });
-      } finally {
-        busy = false;
-        renderPop();
-      }
-    });
-
-    const buttons = [syncBtn];
-    if (!local) {
-      buttons.push(
-        h("button", { type: "button", class: "btn btn-ghost sm", onClick: () => { closePop(); onSettings(); } }, icon("settings"), "Settings"),
-      );
-      if (ctx.settings && ctx.settings.token) {
-        buttons.push(h("button", { type: "button", class: "btn btn-ghost sm danger-text", onClick: () => { closePop(); onForget(); } }, icon("key"), "Forget token"));
-      }
+    const key = `${local}|${hasToken}`;
+    if (!pop || pop.key !== key) {
+      const a = document.activeElement;
+      const act = a && els.pop.contains(a) && a.closest ? (a.closest("[data-act]") || {}).dataset : null;
+      pop = buildPop(local, hasToken);
+      els.pop.replaceChildren(...pop.nodes);
+      const again = act && act.act ? els.pop.querySelector(`[data-act="${act.act}"]`) : null;
+      if (again) again.focus();
     }
+    const p = pop;
 
-    const parts = [
-      h(
-        "div",
-        { class: `pop-head tone-${info.tone}` },
-        h("span", { class: "pop-ico" }, info.tone === "busy" ? spinner() : icon(info.icon || "cloud")),
-        h("div", {}, h("div", { class: "pop-title", text: headline }), explain ? h("div", { class: "pop-sub", text: explain }) : null),
-      ),
-      h(
-        "dl",
-        { class: "pop-rows" },
-        row("Mode", local ? "Lab display (Raspberry Pi)" : ctx.canEdit ? "This browser ↔ GitHub" : "This browser (read-only)"),
-        row("Board file", fileLink),
-        row("Last sync", s.last_sync ? relTime(s.last_sync) : "—"),
-        row("Last push", s.last_push ? relTime(s.last_push) : "—"),
-        row("Waiting", s.pending ? plural(s.pending, "change") : "Nothing"),
-      ),
-      s.last_error ? h("div", { class: "pop-error", role: "note" }, icon("alert"), h("span", { text: s.last_error })) : null,
-      h("div", { class: "pop-actions" }, buttons),
-    ];
-    els.pop.replaceChildren(...parts.filter(Boolean)); // replaceChildren(null) would render "null"
+    p.head.className = `pop-head tone-${info.tone}`;
+    const icoKey = info.tone === "busy" ? "busy" : info.icon || "cloud";
+    if (p.icoKey !== icoKey) {
+      p.icoKey = icoKey;
+      p.ico.replaceChildren(info.tone === "busy" ? spinner() : icon(icoKey));
+    }
+    setText(p.title, headline);
+    setText(p.sub, explain);
+    p.sub.hidden = !explain;
+
+    setText(p.mode.dd, local ? "Lab display (Raspberry Pi)" : ctx.canEdit ? "This browser ↔ GitHub" : "This browser (read-only)");
+    const fileKey = `${fileUrl}|${repo}|${branch}|${path}`;
+    if (p.fileKey !== fileKey) {
+      p.fileKey = fileKey;
+      const where = h("span", { class: "pop-faint pop-block", text: `${branch} · ${path}` });
+      p.file.dd.replaceChildren(
+        ...(fileUrl
+          ? [h("a", { href: fileUrl, target: "_blank", rel: "noopener noreferrer", class: "pop-link", "data-act": "file" }, icon("github"), h("span", { text: repo })), where]
+          : repo
+            ? [h("span", { class: "pop-block", text: repo }), where]
+            : ["—"]),
+      );
+    }
+    setText(p.lastSync.dd, s.last_sync ? relTime(s.last_sync) : "—");
+    setText(p.lastPush.dd, s.last_push ? relTime(s.last_push) : "—");
+    setText(p.waiting.dd, s.pending ? plural(s.pending, "change") : "Nothing");
+    setText(p.errText, s.last_error || "");
+    p.err.hidden = !s.last_error;
+
+    p.syncBtn.disabled = s.state === "off";
+    if (busy) p.syncBtn.setAttribute("aria-disabled", "true");
+    else p.syncBtn.removeAttribute("aria-disabled");
+    if (p.busyKey !== busy) {
+      p.busyKey = busy;
+      p.syncIco.replaceChildren(busy ? spinner() : icon("refresh"));
+      setText(p.syncLabel, busy ? "Syncing…" : "Sync now");
+    }
   }
 
   function openPop() {
@@ -197,6 +251,7 @@ export function initHeader(ctx, { onSyncNow, onSettings, onForget, onTheme }) {
   function closePop() {
     if (els.pop.hidden) return;
     els.pop.hidden = true;
+    pop = null;
     els.pill.setAttribute("aria-expanded", "false");
     document.removeEventListener("pointerdown", outside, true);
     document.removeEventListener("keydown", onKey, true);

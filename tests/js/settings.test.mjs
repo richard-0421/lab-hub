@@ -11,6 +11,8 @@ import {
   normalizeGitHubSettings,
   detectMode,
   githubCacheKey,
+  githubSettingsError,
+  customApiAllowed,
   SETTINGS_KEY,
 } from "../../static/js/sources.js";
 
@@ -47,6 +49,53 @@ describe("defaultGitHubSettings", () => {
   test("query params prefill the defaults", () => {
     const s = defaultGitHubSettings(loc("127.0.0.1", "/", "?repo=me/test&branch=data2&path=x/board.json&api=http://127.0.0.1:9010/"));
     assert.deepEqual(s, { apiBase: "http://127.0.0.1:9010", repo: "me/test", branch: "data2", path: "x/board.json", token: "", clientName: "" });
+  });
+
+  test("?api= only counts on a local development page", () => {
+    for (const host of ["localhost", "127.0.0.1", "[::1]", "lab.localhost"]) {
+      assert.equal(defaultGitHubSettings(loc(host, "/", "?api=http://127.0.0.1:9010")).apiBase, "http://127.0.0.1:9010", host);
+    }
+    for (const host of ["richard-0417.github.io", "evil.example", "localhost.evil.example", ""]) {
+      assert.equal(defaultGitHubSettings(loc(host, "/lab-hub/", "?api=https://evil.example")).apiBase, "https://api.github.com", host);
+    }
+  });
+
+  test("unusable ?branch= / ?path= are ignored", () => {
+    const s = defaultGitHubSettings(loc("richard-0417.github.io", "/lab-hub/", "?path=../pulls/5/merge&branch=../main"));
+    assert.equal(s.path, "board.json");
+    assert.equal(s.branch, "data");
+    assert.equal(defaultGitHubSettings(loc("x.github.io", "/y/", "?path=a/%2e%2e/b")).path, "board.json");
+    assert.equal(defaultGitHubSettings(loc("x.github.io", "/y/", "?path=/data/board.json&branch=feature/x")).path, "data/board.json");
+    assert.equal(defaultGitHubSettings(loc("x.github.io", "/y/", "?branch=feature/x")).branch, "feature/x");
+  });
+});
+
+describe("normalizeGitHubSettings / githubSettingsError", () => {
+  const pages = loc("richard-0417.github.io", "/lab-hub/");
+
+  test("a custom apiBase is dropped on a non-local page (the token only goes to api.github.com)", () => {
+    assert.equal(normalizeGitHubSettings({ apiBase: "https://evil.example" }, pages).apiBase, "https://api.github.com");
+    assert.equal(normalizeGitHubSettings({ apiBase: "https://evil.example/" }, loc("localhost")).apiBase, "https://evil.example");
+    assert.equal(normalizeGitHubSettings({ apiBase: "javascript:alert(1)" }, loc("localhost")).apiBase, "https://api.github.com");
+    assert.equal(normalizeGitHubSettings({ apiBase: "https://user@evil.example" }, loc("localhost")).apiBase, "https://api.github.com");
+    assert.equal(customApiAllowed(pages), false);
+    assert.equal(customApiAllowed(loc("127.0.0.1")), true);
+    assert.equal(customApiAllowed(null), true, "no browser location (node)");
+  });
+
+  test("branch / path / repo checks", () => {
+    const ok = (extra) => githubSettingsError(Object.assign({ repo: "a/b" }, extra));
+    assert.equal(ok({}), null);
+    assert.equal(ok({ path: "data/board.json", branch: "feature/x-1.2" }), null);
+    assert.equal(ok({ path: ".github/board.json" }), null);
+    for (const path of ["../pulls/5/merge", "a/../b", "./x", "a/./b", "a//b", "a\\b", "%2e%2e/x", "my board.json", "a/..", "x?y", "x#y"]) {
+      assert.match(ok({ path }), /file path/, path);
+    }
+    for (const branch of ["../main", "a..b", ".hidden", "x.lock", "x.", "a//b", "a b", "x~1", "a/"]) {
+      assert.match(ok({ branch }), /branch name/, branch);
+    }
+    for (const repo of ["../..", "a/..", "./b", "nope", "a/b/c"]) assert.match(githubSettingsError({ repo }), /owner\/name/, repo);
+    assert.match(ok({ token: "ghp_ab cd" }), /invalid characters/);
   });
 });
 
@@ -136,6 +185,15 @@ describe("testGitHubSettings", () => {
     assert.equal(limited.ok, false);
     assert.match(limited.error, /rate limit/);
   });
+
+  test("unsafe branch / path: refused before the token is sent anywhere", async () => {
+    const f = repoFetch(() => json(200, { permissions: { push: true } }));
+    const r = await testGitHubSettings({ repo: "richard-0417/lab-hub", path: "../pulls/5/merge", token: "tok" }, f);
+    assert.equal(r.ok, false);
+    assert.match(r.error, /file path/);
+    assert.equal((await testGitHubSettings({ repo: "a/b", branch: "../x", token: "tok" }, f)).ok, false);
+    assert.equal(f.calls.length, 0);
+  });
 });
 
 describe("detectMode", () => {
@@ -186,6 +244,18 @@ describe("detectMode", () => {
       loc: null,
     });
     assert.equal(r.mode, "local");
+    assert.equal(n, 2);
+  });
+
+  test("a reply whose body never arrives counts as a timeout (retried), not a hang", async () => {
+    let n = 0;
+    const r = await detectMode({
+      fetchImpl: async () => (n++, new Response(new ReadableStream({ start() {} }), { status: 200 })),
+      timeoutMs: 40,
+      retryDelaysMs: [5],
+      loc: null,
+    });
+    assert.deepEqual(r, { mode: "github" });
     assert.equal(n, 2);
   });
 });

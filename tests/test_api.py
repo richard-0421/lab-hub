@@ -1,4 +1,6 @@
 """HTTP API (uvicorn in a background thread) + config, calendar, version."""
+import asyncio
+import errno
 import json
 import logging
 import os
@@ -13,6 +15,7 @@ import unittest
 import urllib.error
 import urllib.request
 from datetime import datetime
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -21,8 +24,10 @@ if ROOT not in sys.path:
 import uvicorn  # noqa: E402
 
 from app import calendar_feed  # noqa: E402
-from app.config import github_enabled, load_config, redacted  # noqa: E402
+from app import main as app_main  # noqa: E402
+from app.config import git_origin_repo, github_enabled, load_config, redacted  # noqa: E402
 from app.main import compute_version, create_app, git_head_sha, static_files_hash  # noqa: E402
+from app.store import StoreUnavailable  # noqa: E402
 from tests.mock_github import MockGitHub  # noqa: E402
 
 logging.getLogger("labhub").setLevel(logging.CRITICAL)
@@ -241,6 +246,81 @@ class LocalApiTests(_ApiBase):
         status, _, _ = http("GET", self.base + "/definitely-missing.js")
         self.assertEqual(status, 404)
 
+    def test_config_has_lan_url(self):
+        _, _, body = get_json(self.base + "/api/config")
+        self.assertIn("lan_url", body)
+        if body["lan_url"] is not None:  # None on a machine without a LAN address
+            self.assertRegex(body["lan_url"], r"^http://\d+\.\d+\.\d+\.\d+:%d$" % self.srv.port)
+
+    def test_lan_url_failure_never_breaks_config(self):
+        with mock.patch.object(app_main, "primary_lan_ipv4", side_effect=RuntimeError("boom")):
+            status, _, body = get_json(self.base + "/api/config")
+        self.assertEqual(status, 200)
+        self.assertIs(body["labhub"], True)
+        self.assertIsNone(body["lan_url"])
+
+    def board_ids(self):
+        return [t["id"] for t in get_json(self.base + "/api/board")[2]["board"]["tasks"]]
+
+    def test_ops_need_json_content_type(self):
+        body = {"ops": [add_task("t-ctype", "simple request")]}
+        for ctype in ("text/plain;charset=UTF-8", "application/x-www-form-urlencoded", "multipart/form-data; b=x"):
+            status, _, data = http("POST", self.base + "/api/ops", body, headers={"Content-Type": ctype})
+            self.assertEqual(status, 415, ctype)
+            self.assertEqual(json.loads(data)["index"], None)
+        self.assertNotIn("t-ctype", self.board_ids())
+        status, _, _ = http("POST", self.base + "/api/ops", body,
+                            headers={"Content-Type": "application/json; charset=utf-8"})
+        self.assertEqual(status, 200)
+
+    def test_cross_site_writes_are_refused(self):
+        body = {"ops": [add_task("t-xsite", "cross-site")]}
+        for hdrs in ({"Origin": "https://evil.example"}, {"Origin": "null"}, {"Sec-Fetch-Site": "cross-site"},
+                     {"Sec-Fetch-Site": "same-site"}, {"Origin": "http://127.0.0.1:1"},
+                     {"Origin": self.base.replace("http:", "https:")}):
+            status, _, data = http("POST", self.base + "/api/ops", body, headers=hdrs)
+            self.assertEqual(status, 403, hdrs)
+            self.assertIn("cross-site", json.loads(data)["error"])
+            status, _, _ = http("POST", self.base + "/api/sync", headers=hdrs)
+            self.assertEqual(status, 403, hdrs)
+        self.assertNotIn("t-xsite", self.board_ids())
+        # reads, the page itself and scripts without an Origin still work
+        status, _, _ = http("GET", self.base + "/api/board", headers={"Origin": "https://evil.example"})
+        self.assertEqual(status, 200)
+        status, _, _ = http("POST", self.base + "/api/ops", {"ops": [add_task("t-same", "same origin")]},
+                            headers={"Origin": self.base, "Sec-Fetch-Site": "same-origin"})
+        self.assertEqual(status, 200)
+        status, _, _ = http("POST", self.base + "/api/sync", headers={"Origin": self.base.replace("127.0.0.1", "localhost"),
+                                                                    "Host": "localhost:%d" % self.srv.port})
+        self.assertEqual(status, 200)
+
+    def test_unknown_host_names_are_refused(self):
+        bad = {"Host": "rebind.evil.example:%d" % self.srv.port}
+        for path in ("/api/board", "/api/config", "/api/calendar", "/"):
+            status, _, data = http("GET", self.base + path, headers=bad)
+            self.assertEqual(status, 400, path)
+            self.assertIn(b"allowed_hosts", data)
+        status, _, _ = http("POST", self.base + "/api/ops", {"ops": [add_task("t-rebind", "x")]}, headers=bad)
+        self.assertEqual(status, 400)
+        self.assertNotIn("t-rebind", self.board_ids())
+        for host in ("localhost", "127.0.0.1", "[::1]", socket.gethostname()):
+            status, _, _ = http("GET", self.base + "/api/config", headers={"Host": "%s:%d" % (host, self.srv.port)})
+            self.assertEqual(status, 200, host)
+
+    def test_body_size_limit(self):
+        with mock.patch.object(app_main, "MAX_BODY_BYTES", 1000):
+            status, _, data = http("POST", self.base + "/api/ops", {"ops": [add_task("t-big", "x" * 3000)]})
+        self.assertEqual(status, 413)
+        self.assertIn("too large", json.loads(data)["error"])
+        self.assertNotIn("t-big", self.board_ids())
+
+    def test_unsaved_change_is_503(self):
+        store = self.app.state.store
+        with mock.patch.object(store, "submit", side_effect=StoreUnavailable("the Pi could not save the change")):
+            status, _, data = http("POST", self.base + "/api/ops", {"ops": [add_task("t-503", "x")]})
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(data), {"error": "the Pi could not save the change", "index": None})
+
     def test_unicode_round_trip(self):
         title = "Café ✓ \U0001F9EA"
         status, _, data = http("POST", self.base + "/api/ops", {"ops": [add_task("t-uni", title)]})
@@ -382,6 +462,137 @@ class ConfigTests(unittest.TestCase):
         cfg = self.load({"pages_url": "https://lab.example.org/", "github_repo": "a/b", "theme": "neon"})
         self.assertEqual(cfg["pages_url"], "https://lab.example.org/")
         self.assertEqual(cfg["theme"], "dark")
+
+    def test_allowed_hosts(self):
+        self.assertEqual(self.load()["allowed_hosts"], [])
+        cfg = self.load({"allowed_hosts": ["Lab.Example.org.", ".seas.harvard.edu", 3, ""]})
+        self.assertEqual(cfg["allowed_hosts"], ["lab.example.org", ".seas.harvard.edu"])
+        cfg = self.load(env={"LABHUB_ALLOWED_HOSTS": " labpi.example.org, *  "})
+        self.assertEqual(cfg["allowed_hosts"], ["labpi.example.org", "*"])
+
+    def write_git(self, origin, gitfile=False):
+        git = os.path.join(self.tmp, "real.git" if gitfile else ".git")
+        os.makedirs(git, exist_ok=True)
+        with open(os.path.join(git, "config"), "w") as f:
+            f.write('[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://github.com/someone/else.git\n'
+                    '[remote "origin"]\n\turl = %s\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n' % origin)
+        if gitfile:
+            with open(os.path.join(self.tmp, ".git"), "w") as f:
+                f.write("gitdir: real.git\n")
+
+    def test_pages_url_follows_the_code_repo(self):
+        # README "Privacy": the board lives in a private data repo, the site in the code repo
+        self.write_git("git@github.com:richard-0417/lab-hub.git")
+        self.assertEqual(git_origin_repo(self.tmp), "richard-0417/lab-hub")
+        cfg = self.load({"github_repo": "richard-0417/lab-hub-data"})
+        self.assertEqual(cfg["pages_url"], "https://richard-0417.github.io/lab-hub/?repo=richard-0417/lab-hub-data")
+        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub"})["pages_url"],
+                         "https://richard-0417.github.io/lab-hub/")
+        self.assertEqual(self.load({"github_repo": "a/b", "pages_url": "https://lab.example.org/"})["pages_url"],
+                         "https://lab.example.org/")
+
+    def test_pages_url_origin_forms(self):
+        self.write_git("https://user:secret@github.com/Richard-0417/lab-hub", gitfile=True)
+        self.assertEqual(git_origin_repo(self.tmp), "Richard-0417/lab-hub")
+        self.write_git("https://gitlab.com/x/lab-hub.git", gitfile=True)
+        self.assertEqual(git_origin_repo(self.tmp), "")
+        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub-data"})["pages_url"],
+                         "https://richard-0417.github.io/lab-hub-data/")
+        self.assertEqual(git_origin_repo(os.path.join(self.tmp, "nowhere")), "")
+
+
+# --------------------------------------------------------------------------- #
+# request guard + LAN address helpers
+# --------------------------------------------------------------------------- #
+class _FakeSock(object):
+    def __init__(self, ip=None, error=None):
+        self.ip, self.error, self.closed = ip, error, False
+
+    def connect(self, addr):
+        if self.error:
+            raise self.error
+
+    def getsockname(self):
+        return (self.ip, 50000)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeRequest(object):
+    def __init__(self, chunks, length=None):
+        self.headers = {} if length is None else {"content-length": str(length)}
+        self._chunks = chunks
+
+    async def stream(self):
+        for c in self._chunks:
+            yield c
+
+
+class GuardTests(unittest.TestCase):
+    def tearDown(self):
+        app_main.clear_lan_cache()
+
+    def test_split_host(self):
+        self.assertEqual(app_main.split_host("LabPi.Local:8000"), ("labpi.local", "8000"))
+        self.assertEqual(app_main.split_host("[::1]:8000"), ("::1", "8000"))
+        self.assertEqual(app_main.split_host("example.org."), ("example.org", ""))
+        self.assertEqual(app_main.split_host(None), ("", ""))
+
+    def test_host_allowed(self):
+        names = {"labpi", "labpi.local"}
+        for host in ("", "localhost", "kiosk.localhost", "127.0.0.1", "192.168.1.5", "::1", "labpi", "labpi.local"):
+            self.assertTrue(app_main.host_allowed(host, names), host)
+        for host in ("evil.example", "labpi.evil.example", "raspberrypi.attacker.com", "192.168.1.5.nip.io"):
+            self.assertFalse(app_main.host_allowed(host, names), host)
+        extra = (".seas.harvard.edu", "lab.example.org")
+        self.assertTrue(app_main.host_allowed("labpi.seas.harvard.edu", names, extra))
+        self.assertTrue(app_main.host_allowed("lab.example.org", names, extra))
+        self.assertFalse(app_main.host_allowed("seas.harvard.edu.evil.com", names, extra))
+        self.assertTrue(app_main.host_allowed("anything.example", names, ("*",)))
+        self.assertIn("localhost", app_main.local_host_names())
+
+    def test_same_origin(self):
+        self.assertTrue(app_main.same_origin("http://192.168.1.5:8000", "192.168.1.5:8000"))
+        self.assertTrue(app_main.same_origin("http://LabPi.local", "labpi.local:80"))
+        self.assertTrue(app_main.same_origin("http://[::1]:8000", "[::1]:8000"))
+        self.assertFalse(app_main.same_origin("http://192.168.1.5:9000", "192.168.1.5:8000"))
+        self.assertFalse(app_main.same_origin("https://192.168.1.5:8000", "192.168.1.5:8000"))
+        self.assertFalse(app_main.same_origin("null", "192.168.1.5:8000"))
+        self.assertFalse(app_main.same_origin("http://x:notaport", "x"))
+
+    def test_read_body_limit(self):
+        run = asyncio.run
+        self.assertEqual(run(app_main.read_body(_FakeRequest([b"ab", b"cd"]), 4)), b"abcd")
+        self.assertIsNone(run(app_main.read_body(_FakeRequest([b"ab", b"cde"]), 4)))  # no Content-Length
+        self.assertIsNone(run(app_main.read_body(_FakeRequest([], length=5), 4)))
+
+    def test_primary_lan_ipv4(self):
+        socks = []
+
+        def factory(ip=None, error=None):
+            def make(family, kind):
+                socks.append(_FakeSock(ip, error))
+                return socks[-1]
+            return make
+
+        app_main.clear_lan_cache()
+        self.assertEqual(app_main.primary_lan_ipv4(factory("192.168.1.23")), "192.168.1.23")
+        self.assertTrue(socks[-1].closed)
+        # cached: no new socket for a while
+        self.assertEqual(app_main.primary_lan_ipv4(factory(error=OSError(errno.ENETUNREACH, "no route"))),
+                         "192.168.1.23")
+        self.assertEqual(len(socks), 1)
+        self.assertEqual(app_main.lan_url({"host": "0.0.0.0", "port": 8000}, 8123), "http://192.168.1.23:8123")
+        self.assertEqual(app_main.lan_url({"host": "", "port": 80}), "http://192.168.1.23")
+        with mock.patch.object(app_main, "LAN_CACHE_SECONDS", 0):
+            self.assertIsNone(app_main.primary_lan_ipv4(factory(error=OSError(errno.ENETUNREACH, "no route"))))
+            self.assertIsNone(app_main.primary_lan_ipv4(factory("127.0.1.1")))
+        self.assertIsNone(app_main.lan_url({"host": "0.0.0.0", "port": 8000}))
+        # bound to loopback: nobody else can reach it; bound to one address: that one
+        self.assertIsNone(app_main.lan_url({"host": "127.0.0.1", "port": 8000}))
+        self.assertIsNone(app_main.lan_url({"host": "localhost", "port": 8000}))
+        self.assertEqual(app_main.lan_url({"host": "10.0.0.7", "port": 8000}), "http://10.0.0.7:8000")
 
 
 # --------------------------------------------------------------------------- #

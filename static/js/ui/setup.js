@@ -9,6 +9,22 @@ import { DEFAULT_API, normalizeGitHubSettings, testGitHubSettings } from "../sou
 const TOKEN_URL = "https://github.com/settings/personal-access-tokens/new";
 
 /**
+ * What "View read-only" says once armed. Switching an existing, tokened
+ * setup to read-only deletes the saved token (GitHub never shows a
+ * fine-grained token again), so it takes a second click, like Forget token.
+ * Unsynced edits are kept and push once a token is added again.
+ */
+export function readOnlyConfirm(pending = 0) {
+  const n = Number.isFinite(pending) && pending > 0 ? pending : 0;
+  return {
+    label: "Remove token?",
+    warn: n
+      ? `${n} unsynced change${n === 1 ? "" : "s"} from this browser will wait here until a token is added again.`
+      : "The saved token will be removed from this browser. To edit again you'll need to paste a token (GitHub shows a token only once).",
+  };
+}
+
+/**
  * openSetup({initial, existing, onConnect(settings), onReadOnly(settings), onForget})
  *   initial  : settings to prefill (defaults or saved)
  *   existing : true when opened from the header (Settings) rather than first run
@@ -44,7 +60,8 @@ export function openSetup({ initial, existing = false, hasToken = false, pending
   };
 
   const connect = h("button", { type: "button", class: "btn btn-primary", "data-default": "true" }, icon("github"), existing ? "Save" : "Connect");
-  const readOnly = h("button", { type: "button", class: "btn btn-ghost" }, icon("eye"), "View read-only");
+  const readOnly = h("button", { type: "button", class: "btn btn-ghost", "data-act": "readonly" }, icon("eye"), h("span", { text: "View read-only" }));
+  const cancel = existing ? h("button", { type: "button", class: "btn btn-ghost", "data-act": "cancel", text: "Cancel" }) : null;
   let forget = null;
   if (existing && hasToken) {
     forget = h("button", { type: "button", class: "btn btn-danger-ghost" }, icon("key"), "Forget token");
@@ -95,7 +112,7 @@ export function openSetup({ initial, existing = false, hasToken = false, pending
       status,
       existing && pending > 0 ? h("div", { class: "setup-status warn" }, icon("alert"), h("span", { text: `${pending} change${pending === 1 ? " is" : "s are"} still waiting to sync from this browser.` })) : null,
     ],
-    footer: [forget, h("span", { class: "spacer" }), readOnly, connect],
+    footer: [forget, h("span", { class: "spacer" }), cancel, readOnly, connect],
   });
 
   function collect() {
@@ -145,7 +162,19 @@ export function openSetup({ initial, existing = false, hasToken = false, pending
     onConnect(next);
   });
 
+  if (cancel) cancel.addEventListener("click", () => dlg.close());
+
+  let readOnlyArmed = false;
   readOnly.addEventListener("click", () => {
+    if (existing && hasToken && !readOnlyArmed) {
+      readOnlyArmed = true;
+      const c = readOnlyConfirm(pending);
+      readOnly.lastChild.textContent = c.label;
+      readOnly.classList.add("armed");
+      show("warn", c.warn);
+      if (status.scrollIntoView) status.scrollIntoView({ block: "nearest" });
+      return;
+    }
     const next = collect();
     next.token = "";
     dlg.close();

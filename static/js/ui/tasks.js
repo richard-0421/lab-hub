@@ -8,7 +8,8 @@ import { opAdd, opDelete, opUpdate, planMove, rankBetween, nowIso } from "../boa
 import { relTime, initials, hueOf, dayKey, dueDateText, plural, quote } from "./format.js";
 import { perform } from "./actions.js";
 import { openTaskEditor } from "./task-editor.js";
-import { initDnD } from "./dnd.js";
+import { initDnD, resolveDropIndex } from "./dnd.js";
+import { msSinceDialogClose } from "./dialog.js";
 import { openMenu, closeMenu } from "./menu.js";
 import { toast } from "./toast.js";
 import { pset, SORT_KEY } from "./prefs.js";
@@ -25,6 +26,72 @@ const EMPTY = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+/** Keys that may still have been meant for a dialog are ignored this long after one closes. */
+export const DIALOG_KEY_GUARD_MS = 400;
+/** A second Delete within this window confirms deleting the focused card. */
+export const DELETE_CONFIRM_MS = 3000;
+
+/**
+ * What a key pressed on a focused task card does:
+ *   open | toggle | delete | move-up | move-down | move-left | move-right |
+ *   focus-up | focus-down | focus-left | focus-right | swallow | null
+ * Closing a dialog hands focus back to the card that opened it, so Enter /
+ * Space / Delete arriving right after a close are swallowed. Backspace is not
+ * a shortcut at all: it is the key people hit to fix a typo they think is
+ * still in the title field.
+ */
+export function cardKeyAction(e, sinceDialogClose = Infinity) {
+  const k = e.key;
+  const mod = e.altKey || e.metaKey || e.ctrlKey;
+  const risky = k === "Enter" || k === " " || k === "Spacebar" || k === "Delete";
+  if (risky && sinceDialogClose < DIALOG_KEY_GUARD_MS) return "swallow";
+  if (k === "Enter" && !mod) return "open";
+  if ((k === " " || k === "Spacebar") && !mod) return "toggle";
+  if (k === "Delete" && !mod) return "delete";
+  if (e.altKey && !e.metaKey && !e.ctrlKey) {
+    if (k === "ArrowUp") return "move-up";
+    if (k === "ArrowDown") return "move-down";
+    if (k === "ArrowLeft") return "move-left";
+    if (k === "ArrowRight") return "move-right";
+  }
+  if (!mod) {
+    if (k === "ArrowUp") return "focus-up";
+    if (k === "ArrowDown") return "focus-down";
+    if (k === "ArrowLeft") return "focus-left";
+    if (k === "ArrowRight") return "focus-right";
+  }
+  return null;
+}
+
+/** Two-press confirm for a keyboard delete: press(id) is true on the confirming press. */
+export function keyArm(windowMs = DELETE_CONFIRM_MS, clock = Date.now) {
+  let armed = null;
+  return {
+    press(id) {
+      const now = clock();
+      if (armed && armed.id === id && now - armed.at <= windowMs) {
+        armed = null;
+        return true;
+      }
+      armed = { id, at: now };
+      return false;
+    },
+    reset() {
+      armed = null;
+    },
+  };
+}
+
+/**
+ * The `set` for moving a task into a different, non-done status `to`.
+ * done_at is always cleared — not only when this board shows the task as done:
+ * it may have been completed on another device since this board was fetched,
+ * and clearing an empty field changes nothing.
+ */
+export function leaveStatusSet(to) {
+  return { status: to, done_at: "" };
+}
 
 export function initTasks(ctx) {
   const columnsEl = $("columns");
@@ -279,8 +346,13 @@ export function initTasks(ctx) {
     );
   }
 
-  /** Drop handler (drag & drop, menu, keyboard): move `id` to `status` at `index` of its manual order. */
-  function moveTo(id, status, index) {
+  /**
+   * Drop handler (drag & drop, menu, keyboard): move `id` to `status` at
+   * `index` of its manual order. Drag & drop also passes the ids of the cards
+   * around the drop slot, which win over the index (the DOM it was measured
+   * on is frozen during a drag while the board may have changed).
+   */
+  function moveTo(id, status, index, anchors) {
     const t = find(id);
     if (!t) return;
     if (status === "done") {
@@ -288,15 +360,15 @@ export function initTasks(ctx) {
       return;
     }
     const list = byStatus(status).filter((x) => x.id !== id);
-    const set = {};
+    const at = resolveDropIndex(list, index, anchors);
+    let set = {};
     if (t.status !== status) {
-      set.status = status;
-      if (t.status === "done") set.done_at = "";
+      set = leaveStatusSet(status);
     } else {
       const orig = byStatus(status).findIndex((x) => x.id === id);
-      if (orig === index) return;
+      if (orig === at) return;
     }
-    const ops = planMove({ list, id, toIndex: index, set, by: by() });
+    const ops = planMove({ list, id, toIndex: at, set, by: by() });
     perform(ctx, ops, t.status === "done" ? { undo: `Moved ${quote(t.title)} back to ${STATUS_LABEL[status]}` } : {});
   }
 
@@ -494,9 +566,9 @@ export function initTasks(ctx) {
     columnsEl,
     tabsEl,
     canReorder,
-    onDrop: (id, status, index) => {
+    onDrop: (id, status, index, anchors) => {
       if (ctx.isPhone() && status !== ctx.ui.tab) setTab(status);
-      moveTo(id, status, index);
+      moveTo(id, status, index, anchors);
     },
     onEnd: () => ctx.requestRender(),
   });
@@ -536,44 +608,93 @@ export function initTasks(ctx) {
     return null;
   }
 
+  const deleteArm = keyArm();
+  let armedCard = null;
+  let armedTimer = 0;
+  function disarmCard() {
+    clearTimeout(armedTimer);
+    if (armedCard) armedCard.classList.remove("del-armed");
+    armedCard = null;
+  }
+
   columnsEl.addEventListener("keydown", (e) => {
     const card = e.target;
     if (!card.classList || !card.classList.contains("task")) return;
     const t = find(card.dataset.id);
     if (!t) return;
-    const k = e.key;
-    if (k === "Enter") {
-      e.preventDefault();
-      openEditor(t);
-    } else if (k === " " || k === "Spacebar") {
-      e.preventDefault();
-      if (!ctx.canEdit) return;
-      pendingFocus = `task:${t.id}`;
-      toggleDone(t);
-    } else if (e.altKey && (k === "ArrowUp" || k === "ArrowDown")) {
-      e.preventDefault();
-      if (ctx.canEdit) moveWithin(t, k === "ArrowUp" ? -1 : 1);
-    } else if (e.altKey && (k === "ArrowLeft" || k === "ArrowRight")) {
-      e.preventDefault();
-      if (ctx.canEdit) moveAcross(t, k === "ArrowLeft" ? -1 : 1);
-    } else if (k === "Delete" || k === "Backspace") {
-      e.preventDefault();
-      if (!ctx.canEdit) return;
-      const next = neighbourCard(card, 1) || neighbourCard(card, -1);
-      if (next) pendingFocus = next.dataset.key;
-      remove(t);
-    } else if (!e.altKey && !e.metaKey && !e.ctrlKey && (k === "ArrowUp" || k === "ArrowDown")) {
-      const n = neighbourCard(card, k === "ArrowUp" ? -1 : 1);
-      if (n) {
+    const action = cardKeyAction(e, msSinceDialogClose());
+    if (action !== "delete") {
+      deleteArm.reset();
+      disarmCard();
+    }
+    switch (action) {
+      case "swallow":
         e.preventDefault();
-        n.focus();
-      }
-    } else if (!e.altKey && !e.metaKey && !e.ctrlKey && (k === "ArrowLeft" || k === "ArrowRight")) {
-      const n = sideCard(card, k === "ArrowLeft" ? -1 : 1);
-      if (n) {
+        break;
+      case "open":
         e.preventDefault();
-        n.focus();
+        openEditor(t);
+        break;
+      case "toggle":
+        e.preventDefault();
+        if (!ctx.canEdit) return;
+        pendingFocus = `task:${t.id}`;
+        toggleDone(t);
+        break;
+      case "move-up":
+      case "move-down":
+        e.preventDefault();
+        if (ctx.canEdit) moveWithin(t, action === "move-up" ? -1 : 1);
+        break;
+      case "move-left":
+      case "move-right":
+        e.preventDefault();
+        if (ctx.canEdit) moveAcross(t, action === "move-left" ? -1 : 1);
+        break;
+      case "delete": {
+        e.preventDefault();
+        if (!ctx.canEdit) return;
+        if (!deleteArm.press(t.id)) {
+          // First press only arms: a stray key must not silently delete a task.
+          disarmCard();
+          armedCard = card;
+          card.classList.add("del-armed");
+          armedTimer = setTimeout(disarmCard, DELETE_CONFIRM_MS);
+          toast({ message: `Press Delete again to delete ${quote(t.title)}`, timeout: DELETE_CONFIRM_MS });
+          return;
+        }
+        disarmCard();
+        const next = neighbourCard(card, 1) || neighbourCard(card, -1);
+        if (next) pendingFocus = next.dataset.key;
+        remove(t);
+        break;
       }
+      case "focus-up":
+      case "focus-down": {
+        const n = neighbourCard(card, action === "focus-up" ? -1 : 1);
+        if (n) {
+          e.preventDefault();
+          n.focus();
+        }
+        break;
+      }
+      case "focus-left":
+      case "focus-right": {
+        const n = sideCard(card, action === "focus-left" ? -1 : 1);
+        if (n) {
+          e.preventDefault();
+          n.focus();
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  });
+  columnsEl.addEventListener("focusout", (e) => {
+    if (armedCard && e.target === armedCard) {
+      deleteArm.reset();
+      disarmCard();
     }
   });
 

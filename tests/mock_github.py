@@ -4,12 +4,14 @@ Good enough for the Python tests and for a browser (manual end-to-end runs of
 the GitHub Pages frontend against it):
 
     GET  /repos/{o}/{r}                         default_branch, private, permissions
-    GET  /repos/{o}/{r}/contents/{path}?ref=b   base64 (wrapped at 60 chars), ETag, 304
+    GET  /repos/{o}/{r}/contents/{path}?ref=b   base64 (wrapped at 60 chars), ETag, 304;
+                                                ref may also be a commit sha
     PUT  /repos/{o}/{r}/contents/{path}         sha checks: 422 missing sha, 409 wrong sha,
                                                 404 unknown branch
     GET  /repos/{o}/{r}/git/ref/heads/{b}
     POST /repos/{o}/{r}/git/refs
     GET  /repos/{o}/{r}/git/blobs/{sha}
+    GET  /repos/{o}/{r}/commits?sha=b&path=p&per_page=n   newest first
     GET  /user
 
 Auth: "Authorization: Bearer <token>" or "token <token>"; a wrong token -> 401;
@@ -17,6 +19,7 @@ no token on a private repo -> 404 (like GitHub). CORS headers on every
 response; OPTIONS preflight answered.
 
 Python test hooks (methods on MockGitHub): fail_next(), on_next(),
+drop_response_next() (handle a request, then hang up without answering),
 set_file_text(), get_file_text(), set_offline(), requests (log), commits().
 
 HTTP control endpoints (handy from curl during manual tests; no auth):
@@ -34,8 +37,10 @@ Run:
 import argparse
 import base64
 import hashlib
+import io
 import json
 import os
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -83,13 +88,14 @@ class MockGitHub(object):
         self._counter = 0
         # branch -> {"commit": sha, "files": {path: bytes}}
         self.branches = {}
-        self._commits = []  # [{"sha", "branch", "message", "paths"}]
+        self._commits = []  # [{"sha", "branch", "message", "paths", "files", "date"}]
         self._new_commit(default_branch, {"README.md": b"# lab-hub\n"}, "Initial commit")
         if create_data_branch:
             self._new_commit(data_branch, dict(self.branches[default_branch]["files"]), "create %s" % data_branch)
         self.requests = []
         self._fails = []
         self._hooks = []
+        self._drops = []
         self.offline = False
         self.rate_remaining = 4999
         self.server = ThreadingHTTPServer((host, port), _Handler)
@@ -124,7 +130,8 @@ class MockGitHub(object):
             self._counter += 1
             sha = hashlib.sha1(("commit-%d-%s-%f" % (self._counter, branch, time.time())).encode()).hexdigest()
             self.branches[branch] = {"commit": sha, "files": files}
-            self._commits.append({"sha": sha, "branch": branch, "message": message, "paths": list(paths)})
+            self._commits.append({"sha": sha, "branch": branch, "message": message, "paths": list(paths),
+                                  "files": files, "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
             return sha
 
     def set_file_text(self, branch, path, text, message="edit via web"):
@@ -164,6 +171,12 @@ class MockGitHub(object):
         """The next request matching method/path gets this error response."""
         with self.lock:
             self._fails.append((status, message, method, path_contains, headers or {}))
+
+    def drop_response_next(self, method, path_contains=None):
+        """Handle the next matching request normally (a PUT is committed) but
+        close the connection instead of answering - a lost response."""
+        with self.lock:
+            self._drops.append((method, path_contains, None))
 
     def on_next(self, method, fn, path_contains=None):
         """Call ``fn()`` once, right before handling the next matching request
@@ -300,6 +313,24 @@ class _Handler(BaseHTTPRequestHandler):
         hook = mock._pop_matching(mock._hooks, method, path)
         if hook is not None:
             hook[2]()
+        if mock._pop_matching(mock._drops, method, path) is not None:
+            real = self.wfile
+            self.wfile = io.BytesIO()  # the answer goes nowhere
+            try:
+                self._route(method, path, query, body)
+            finally:
+                self.wfile = real
+                self.close_connection = True
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                with mock.lock:
+                    mock.requests.append({"method": method, "path": path, "query": query, "status": "dropped",
+                                          "if_none_match": self.headers.get("If-None-Match"),
+                                          "auth": bool(self.headers.get("Authorization")),
+                                          "body": body.decode("utf-8", "replace") if method in ("PUT", "POST") else None})
+            return
         try:
             fail = mock._pop_matching(mock._fails, method, path)
             if fail is not None:
@@ -364,6 +395,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._create_ref(body)
             if rest[:2] == ["git", "blobs"] and len(rest) == 3 and method == "GET":
                 return self._get_blob(rest[2])
+            if rest == ["commits"] and method == "GET":
+                return self._list_commits(query)
         return self._error(404, "Not Found")
 
     # ---- endpoints ------------------------------------------------------ #
@@ -401,6 +434,8 @@ class _Handler(BaseHTTPRequestHandler):
         mock = self.mock
         ref = query.get("ref") or mock.default_branch
         branch = mock.branches.get(ref)
+        if branch is None:
+            branch = next((c for c in mock._commits if c["sha"] == ref), None)
         if branch is None:
             return self._error(404, "No commit found for the ref %s" % ref)
         data = branch["files"].get(fpath)
@@ -459,6 +494,26 @@ class _Handler(BaseHTTPRequestHandler):
                 "author": {"name": "mock", "email": "mock@example.com", "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
             },
         })
+
+    def _list_commits(self, query):
+        mock = self.mock
+        branch = query.get("sha") or mock.default_branch
+        if branch not in mock.branches:
+            return self._error(404, "No commit found for SHA: %s" % branch)
+        fpath = query.get("path")
+        try:
+            per_page = max(1, min(100, int(query.get("per_page") or 30)))
+        except ValueError:
+            per_page = 30
+        out = []
+        for c in reversed(mock._commits):
+            if c["branch"] != branch or (fpath and fpath not in c["paths"]):
+                continue
+            out.append({"sha": c["sha"], "commit": {"message": c["message"],
+                                                    "committer": {"name": "mock", "date": c["date"]}}})
+            if len(out) >= per_page:
+                break
+        return self._json(200, out)
 
     def _get_ref(self, name):
         mock = self.mock

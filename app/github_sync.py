@@ -2,11 +2,23 @@
 
 The sync cycle is described in docs/ARCHITECTURE.md section 4:
 fetch board.json (If-None-Match) -> rebase pending ops on it -> PUT with the
-old sha -> on 409 refetch and retry. The token lives only in this module's
+old sha -> on 409 refetch and retry.
+
+A PUT can be committed by GitHub even though its answer never arrives
+(timeout, dropped connection, 5xx, the service restarting mid-request). Every
+PUT is therefore recorded first (Store.begin_push: the parent sha and the git
+blob sha of the bytes sent). When the answer is lost the worker looks at
+GitHub right away and again at the start of the next cycle: the remote blob is
+ours -> the push landed; it is still the parent -> it did not; otherwise the
+file's recent history tells. Only a push that did not land is sent again, so
+an old push is never replayed over edits other people made since.
+
+The token lives only in this module's
 request headers; it is never logged, never put in an error message and never
 returned to browsers.
 """
 import base64
+import hashlib
 import http.client
 import json
 import logging
@@ -18,6 +30,8 @@ import urllib.parse
 import urllib.request
 
 from .board import (
+    COLLECTIONS,
+    MAX_ITEMS,
     apply_ops,
     canonical_timestamp,
     clean_text,
@@ -38,6 +52,7 @@ MAX_DEBOUNCE = 5.0      # ... but never wait longer than this after the first ed
 MAX_BACKOFF = 300.0
 MAX_CONFLICT_RETRIES = 3
 MANUAL_SYNC_WAIT = 20.0
+HISTORY_LOOKUP = 10     # commits checked when settling an unanswered push
 
 
 class OfflineError(Exception):
@@ -79,6 +94,11 @@ def _error_message(data, fallback):
     except Exception:  # noqa: BLE001
         pass
     return fallback
+
+
+def git_blob_sha(data):
+    """The sha GitHub reports (``content.sha``) for a file with these bytes."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
 def _decode_b64(content):
@@ -214,6 +234,18 @@ class GitHubClient(object):
             self._raise(status, headers, data)
         return self._json(data)
 
+    def list_commits(self, branch, path, per_page=HISTORY_LOOKUP):
+        """Shas of the newest commits on ``branch`` that touched ``path``."""
+        status, headers, data = self.request(
+            "GET", self._repo_path("/commits"), {"sha": branch, "path": path, "per_page": per_page}
+        )
+        if status != 200:
+            self._raise(status, headers, data)
+        info = self._json(data)
+        if not isinstance(info, list):
+            raise GitHubError(status, "unexpected commit list response")
+        return [c["sha"] for c in info if isinstance(c, dict) and isinstance(c.get("sha"), str)]
+
     def get_repo(self):
         status, headers, data = self.request("GET", self._repo_path())
         if status != 200:
@@ -277,6 +309,12 @@ def _is_sha_conflict(exc):
     if exc.status == 409:
         return True
     return exc.status == 422 and "sha" in exc.message.lower()
+
+
+def _is_unanswered(exc):
+    """A failed PUT that GitHub may have committed anyway: 5xx (the front end
+    gave up, the commit may not have) or a 2xx we could not read (status 0)."""
+    return exc.status == 0 or exc.status >= 500
 
 
 # --------------------------------------------------------------------------- #
@@ -415,6 +453,11 @@ class SyncWorker(object):
                 raise SyncError("%s on GitHub is not valid JSON: %s" % (self.path, exc))
             board = normalize_board(raw)
             needs_fix = not same_json(board, raw)
+            over = [c for c in COLLECTIONS if isinstance(raw, dict) and isinstance(raw.get(c), list)
+                    and len(raw[c]) > MAX_ITEMS]
+            if over:
+                log.warning("%s on GitHub has more than %d items in %s; only the first %d (by rank) are kept",
+                            self.path, MAX_ITEMS, ", ".join(over), MAX_ITEMS)
             # Without the etag the next cycle re-downloads, so a failed fix
             # push is retried.
             store.on_remote_fetched(board, res.sha, None if needs_fix else res.etag)
@@ -455,6 +498,11 @@ class SyncWorker(object):
         branch_created = False
         while True:
             needs_fix = self._fetch()
+            self._settle_inflight()
+            dropped = store.drop_reimported_legacy_adds()
+            if dropped:
+                log.warning("GitHub already has items from a legacy import; not importing %d legacy item(s) "
+                            "again (that would bring back the ones deleted since)", dropped)
             base, ops, k, sha, remote_exists = store.snapshot_for_push()
             if not ops and remote_exists and not needs_fix:
                 store.mark_ok()
@@ -470,12 +518,22 @@ class SyncWorker(object):
             doc["updated_at"] = last_ts or now_iso()
             doc["updated_by"] = clean_text(self.client_name, 60)
             message = self._commit_message(ops, base, remote_exists, needs_fix)
+            body = serialize_board_bytes(doc)
+            parent = sha if remote_exists else None
+            store.begin_push(k, parent, git_blob_sha(body))
             store.set_syncing()
             try:
-                result = self.client.put_file(
-                    self.path, self.branch, serialize_board_bytes(doc), message, sha if remote_exists else None
-                )
+                result = self.client.put_file(self.path, self.branch, body, message, parent)
+            except OfflineError:
+                if self._landed_after_all():
+                    return "ok"
+                raise
             except GitHubError as exc:
+                if _is_unanswered(exc):
+                    if self._landed_after_all():
+                        return "ok"
+                    raise
+                store.clear_inflight()  # a definite "no": nothing was written
                 if _is_branch_missing(exc) and not branch_created:
                     self._create_branch()
                     branch_created = True
@@ -493,6 +551,57 @@ class SyncWorker(object):
             store.on_push_succeeded(doc, new_sha, k)
             log.info("pushed %d op(s) to %s:%s", k, self.branch, self.path)
             return "ok"
+
+    # ---- pushes whose answer was lost ------------------------------------ #
+    def _settle_inflight(self):
+        """Right after a fetch: decide whether the recorded PUT (if any)
+        reached GitHub. Returns True when it did; its ops are then dropped
+        instead of being sent again."""
+        store = self.store
+        rec = store.inflight()
+        if rec is None:
+            return False
+        params = store.fetch_params()
+        remote = params["sha"] if params["remote_exists"] else None
+        if remote is not None and remote == rec["expected"]:
+            landed = True
+        elif remote == rec["parent"]:
+            landed = False
+        else:
+            landed = self._push_in_history(rec)
+        if not landed:
+            store.clear_inflight()
+            return False
+        if store.on_push_landed():
+            log.info("a push whose answer was lost did reach GitHub; its %d op(s) are not sent again", rec["k"])
+        return True
+
+    def _push_in_history(self, rec):
+        """Walk the newest commits that touched the file: our blob before the
+        parent's -> the push landed. OfflineError propagates (keep the record
+        and look again next cycle)."""
+        try:
+            for commit in self.client.list_commits(self.branch, self.path, HISTORY_LOOKUP):
+                res = self.client.get_file(self.path, commit)
+                if res.status != 200:
+                    continue
+                if res.sha == rec["expected"]:
+                    return True
+                if res.sha == rec["parent"]:
+                    return False
+        except GitHubError as exc:
+            log.warning("could not read the history of %s (%s)", self.path, describe_error(exc))
+        log.warning("could not tell whether an unanswered push reached GitHub; sending its ops again")
+        return False
+
+    def _landed_after_all(self):
+        """The PUT failed without a definite answer: look at GitHub now."""
+        try:
+            self.store.clear_etag()
+            self._fetch()
+            return self._settle_inflight()
+        except Exception:  # noqa: BLE001 - still unknown; the next cycle looks again
+            return False
 
     def _commit_message(self, ops, base, remote_exists, needs_fix):
         if ops:

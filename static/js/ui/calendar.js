@@ -14,12 +14,31 @@ function parseLocal(s) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-export function initCalendar(ctx) {
+/**
+ * Feed events -> [{e, start, end, isNow}] that haven't ended at `now`.
+ * A missing end follows RFC 5545: an all-day event lasts one day, a timed one
+ * has no duration — so it is never "Now" and leaves the list once it starts.
+ */
+export function calendarEntries(events, now = new Date()) {
+  return (Array.isArray(events) ? events : [])
+    .filter((e) => e && typeof e === "object")
+    .map((e) => {
+      const start = parseLocal(e.start);
+      let end = parseLocal(e.end);
+      if (start && (!end || end < start)) end = e.all_day ? addDays(start, 1) : start;
+      return { e, start, end };
+    })
+    .filter((x) => x.start && x.end > now)
+    .map((x) => Object.assign(x, { isNow: !x.e.all_day && x.start <= now && x.end > now }));
+}
+
+export function initCalendar(ctx, { onRender = null } = {}) {
   const body = $("cal-body");
   const side = $("cal-side");
   let data = null; // {configured, events}
   let failed = false;
   let timer = null;
+  let today = 0;
 
   async function load() {
     try {
@@ -49,6 +68,12 @@ export function initCalendar(ctx) {
   }
 
   function render() {
+    paint();
+    if (onRender) onRender();
+  }
+
+  function paint() {
+    today = 0;
     if (!data) {
       if (failed) body.replaceChildren(h("div", { class: "card-empty" }, icon("cloud-off"), h("span", { text: "Couldn't load the calendar." })));
       return;
@@ -60,14 +85,7 @@ export function initCalendar(ctx) {
     }
     const now = new Date();
     const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const events = (Array.isArray(data.events) ? data.events : [])
-      .map((e) => {
-        const start = parseLocal(e.start);
-        let end = parseLocal(e.end);
-        if (start && e.all_day && !end) end = addDays(start, 1);
-        return { e, start, end };
-      })
-      .filter((x) => x.start && (x.end ? x.end > now : x.start >= new Date(now.getTime() - 3 * 3600 * 1000)));
+    const events = calendarEntries(data.events, now);
 
     if (!events.length) {
       side.textContent = "";
@@ -94,7 +112,7 @@ export function initCalendar(ctx) {
       if (dayKey(day) === dayKey(now)) todayCount = items.length;
       nodes.push(h("div", { class: "cal-day" }, h("span", { text: dayLabel(day, now) })));
       for (const x of items) {
-        const isNow = !x.e.all_day && x.start <= now && (!x.end || x.end > now);
+        const isNow = x.isNow;
         const isNext = x === nextTimed;
         const sameDayEnd = x.end && dayKey(x.end) === dayKey(x.start) && x.end > x.start;
         const time = x.e.all_day
@@ -120,6 +138,7 @@ export function initCalendar(ctx) {
         );
       }
     }
+    today = todayCount;
     side.textContent = todayCount ? `${todayCount} today` : "";
     body.replaceChildren(...nodes);
   }
@@ -131,5 +150,7 @@ export function initCalendar(ctx) {
       timer = setInterval(load, REFRESH_MS);
     },
     render,
+    /** Events left today (for the compact-layout tab badge). */
+    todayCount: () => today,
   };
 }

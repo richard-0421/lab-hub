@@ -3,7 +3,8 @@
 //   existing task -> update with ONLY the fields the user changed (diffed
 //                    against the task as it was when the dialog opened, so a
 //                    concurrent edit of another field elsewhere survives).
-//   Status into Done sets done_at; out of Done clears it.
+//   Status into Done sets done_at; to any other status always clears it (the
+//   task may have been completed elsewhere while the dialog was open).
 
 import { h, autoGrow, armButton } from "./dom.js";
 import { icon } from "./icons.js";
@@ -16,6 +17,26 @@ import { toast } from "./toast.js";
 const EDIT_FIELDS = ["title", "notes", "status", "priority", "assignee", "due", "tags"];
 
 const same = (a, b) => (Array.isArray(a) || Array.isArray(b) ? JSON.stringify(a) === JSON.stringify(b) : a === b);
+
+/**
+ * The update `set` for saving `edits` over `snap` (the task as it was when
+ * the editor opened): only the changed fields. A status change to Done stamps
+ * done_at = now(); to To do / In progress it clears done_at and moves the
+ * task to the top of that column (rank = topRank(status)).
+ */
+export function taskUpdateSet(snap, edits, { now = nowIso, topRank = () => 0 } = {}) {
+  const next = normalizeItem("tasks", Object.assign({}, snap, edits));
+  const set = {};
+  for (const f of EDIT_FIELDS) if (!same(next[f], snap[f])) set[f] = next[f];
+  if ("status" in set) {
+    if (set.status === "done") set.done_at = now();
+    else {
+      set.done_at = "";
+      set.rank = topRank(set.status);
+    }
+  }
+  return { set, next };
+}
 
 export function openTaskEditor(ctx, { task = null, status = "todo" } = {}) {
   const isNew = !task;
@@ -183,16 +204,7 @@ export function openTaskEditor(ctx, { task = null, status = "todo" } = {}) {
       return;
     }
 
-    const next = normalizeItem("tasks", Object.assign({}, snap, edits));
-    const set = {};
-    for (const f of EDIT_FIELDS) if (!same(next[f], snap[f])) set[f] = next[f];
-    if ("status" in set) {
-      if (set.status === "done") set.done_at = nowIso();
-      else {
-        if (snap.status === "done") set.done_at = "";
-        set.rank = topRank(set.status, snap.id);
-      }
-    }
+    const { set, next } = taskUpdateSet(snap, edits, { now: nowIso, topRank: (s) => topRank(s, snap.id) });
     if (Object.keys(set).length) {
       const undo = set.status === "done" ? `Completed ${quote(next.title)}` : null;
       perform(ctx, [opUpdate("tasks", snap.id, set, by)], { undo });

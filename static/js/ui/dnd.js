@@ -8,17 +8,40 @@
 // While dragging, the real card element stays in the DOM as the dashed drop
 // slot ("placeholder") and a fixed-position clone (the ghost) follows the
 // pointer. Lists auto-scroll near their edges; Esc cancels. The caller's
-// onDrop(id, status, index) receives the destination status and the index in
-// that column's manual (rank) order EXCLUDING the moving card — exactly what
-// planMove() expects. When the destination column can't be re-ordered
-// (Done, a sort or filter is active) the drop goes to the top (index 0) and a
-// drop back into the source column is a no-op.
+// onDrop(id, status, index, {prevId, nextId}) receives the destination status,
+// the index in that column's manual (rank) order EXCLUDING the moving card —
+// exactly what planMove() expects — and the ids of the cards just above and
+// below the drop slot. The board is not re-rendered mid-drag, so the index is
+// a position in the DOM as it was when the drag started; resolve it against
+// the current board with resolveDropIndex() so a task added or removed
+// elsewhere meanwhile doesn't shift the drop. When the destination column
+// can't be re-ordered (Done, a sort or filter is active) the drop goes to the
+// top (index 0) and a drop back into the source column is a no-op.
 
 const LONG_PRESS_MS = 300;
 const MOUSE_SLOP = 5;
 const TOUCH_SLOP = 10;
 const EDGE = 64;
 const MAX_SPEED = 16;
+
+/**
+ * Where to insert in `list` (the destination column in rank order, without
+ * the moving card): right after `prevId`, else right before `nextId`, else at
+ * `index` (clamped) when neither neighbour is on the board any more.
+ */
+export function resolveDropIndex(list, index, { prevId = null, nextId = null } = {}) {
+  const items = Array.isArray(list) ? list : [];
+  if (prevId) {
+    const i = items.findIndex((x) => x && x.id === prevId);
+    if (i >= 0) return i + 1;
+  }
+  if (nextId) {
+    const i = items.findIndex((x) => x && x.id === nextId);
+    if (i >= 0) return i;
+  }
+  const n = Number.isFinite(index) ? Math.trunc(index) : items.length;
+  return Math.max(0, Math.min(n, items.length));
+}
 
 export function initDnD({ ctx, columnsEl, tabsEl, canReorder, onDrop, onEnd }) {
   let pending = null;
@@ -257,7 +280,8 @@ export function initDnD({ ctx, columnsEl, tabsEl, canReorder, onDrop, onEnd }) {
       const after = last ? last.nextSibling : t.list.firstChild;
       if (card.parentNode !== t.list || (last ? card.previousSibling !== last : t.list.firstChild !== card)) t.list.insertBefore(card, after);
     }
-    drag.over = { status: t.status, index: idx };
+    const prev = idx > 0 ? cards[idx - 1] : null;
+    drag.over = { status: t.status, index: idx, prevId: prev ? prev.dataset.id : null, nextId: ref ? ref.dataset.id : null };
   }
 
   function scrollStep(pos, lo, hi) {
@@ -309,7 +333,7 @@ export function initDnD({ ctx, columnsEl, tabsEl, canReorder, onDrop, onEnd }) {
     document.documentElement.classList.remove("is-dragging");
     suppressClickUntil = Date.now() + 400;
     ctx.dragging = false;
-    if (commit && d.over) onDrop(d.id, d.over.status, d.over.index);
+    if (commit && d.over) onDrop(d.id, d.over.status, d.over.index, { prevId: d.over.prevId || null, nextId: d.over.nextId || null });
     onEnd();
   }
 

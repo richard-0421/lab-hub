@@ -374,9 +374,15 @@ html[data-theme="light"] .theme-ico-light {
   transform: translateY(1px);
 }
 
-.btn:disabled {
+.btn:disabled,
+.btn[aria-disabled="true"] {
   opacity: 0.55;
   cursor: default;
+}
+
+.btn-ico {
+  display: inline-grid;
+  place-items: center;
 }
 
 .btn.sm {
@@ -423,6 +429,7 @@ html[data-theme="light"] .theme-ico-light {
 }
 
 .btn.armed,
+.btn.armed:hover:not(:disabled),
 .clear-btn.armed {
   background: var(--danger);
   border-color: transparent;
@@ -1618,7 +1625,7 @@ html[data-theme="light"] .avatar {
   color: var(--text);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .task:hover .task-more,
   .task:focus-within .task-more,
   .task-more[aria-expanded="true"] {
@@ -1631,6 +1638,42 @@ html[data-theme="light"] .avatar {
   .task:has(.task-more[aria-expanded="true"]) .avatar {
     opacity: 0;
   }
+}
+
+/* Touch screens can't hover: the "⋯" actions sit under the avatar, always visible. */
+@media (hover: none), (pointer: coarse) {
+  .avatar-slot {
+    width: auto;
+    height: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .task-more {
+    position: static;
+    inset: auto;
+    margin: -0.35rem -0.45rem;
+    width: 2.75rem;
+    height: 2.4rem;
+    border: 0;
+    background: transparent;
+    color: var(--text-3);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .task-more[aria-expanded="true"] {
+    background: var(--chip-bg);
+    color: var(--text);
+  }
+}
+
+/* First Delete on a focused card arms it; a second one deletes. */
+.task.del-armed {
+  outline: 2px solid var(--danger);
+  outline-offset: 1px;
 }
 
 .task.is-done {
@@ -1909,6 +1952,38 @@ html[data-theme="light"] .ico-cal {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0 0.7rem 0.7rem;
+}
+
+/* A list that continues below the visible part fades out at the bottom (a row
+   cut in half with no scrollbar on a touchscreen reads as broken, not as
+   "scroll for more"); scrolling snaps to whole rows at the top. */
+.rail-card .card-body.more-below {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 2.4rem), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 2.4rem), transparent);
+}
+
+/* Scrolling stops on whole rows / notes rather than mid-line. */
+#req-body,
+#notes-body {
+  scroll-snap-type: y mandatory;
+}
+
+.req,
+.note {
+  scroll-snap-align: start;
+}
+
+.rail-card:focus {
+  outline: none;
+}
+
+/* header tabs for the slide-over rail (only shown on short landscape screens) */
+.rail-tabs {
+  display: none;
+}
+
+.rail-scrim {
+  display: none;
 }
 
 .card-empty {
@@ -2673,6 +2748,11 @@ dialog.dlg::backdrop {
 
 .spacer {
   flex: 1;
+}
+
+/* When the footer wraps, the main action stays on the right. */
+.dlg-foot .btn-primary:last-child {
+  margin-left: auto;
 }
 
 .fld {
@@ -3513,6 +3593,161 @@ html[data-theme="light"] .toast-action {
   }
 }
 
+/* Slide-over rail: landscape screens too small for a side rail (the 800x480 Pi
+   touchscreen, 1024x600 panels). The board fills the screen; the header tabs
+   open one side card at a time over its right edge. Keep the query in sync
+   with drawerMql in js/app.js. */
+@media (min-width: 700px) and (max-width: 1099px) and (max-height: 820px) {
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .app {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+  }
+
+  .layout {
+    position: relative;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .board {
+    height: auto;
+  }
+
+  .rail-tabs {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .rail-tab {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    height: var(--hit);
+    min-width: var(--hit);
+    padding: 0 0.6rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--muted);
+    font-size: 0.84rem;
+    font-weight: 650;
+    white-space: nowrap;
+  }
+
+  .rail-tab .icon {
+    width: 1.1rem;
+    height: 1.1rem;
+  }
+
+  .rail-tab[aria-expanded="true"] {
+    border-color: transparent;
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  .rail-tab-label {
+    display: none;
+  }
+
+  .rail-tab-count {
+    min-width: 1.25rem;
+    height: 1.25rem;
+    padding: 0 0.3rem;
+    display: inline-grid;
+    place-items: center;
+    border-radius: 999px;
+    background: var(--chip-bg);
+    color: var(--text);
+    font-size: 0.72rem;
+    font-weight: 750;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .rail-tab-count[hidden] {
+    display: none;
+  }
+
+  html[data-mode="github"] .rail-tab[data-card="calendar"] {
+    display: none;
+  }
+
+  .rail {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    width: min(27rem, 66%);
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    transform: translateX(calc(100% + var(--gutter) + 12px));
+    visibility: hidden;
+    transition: transform 200ms var(--ease), visibility 0s linear 200ms;
+  }
+
+  html[data-rail] .rail {
+    transform: none;
+    visibility: visible;
+    transition: transform 200ms var(--ease);
+  }
+
+  .rail-card {
+    display: none;
+    flex: 1 1 auto;
+    max-height: none;
+    box-shadow: var(--shadow-pop);
+    border-color: var(--border-strong);
+  }
+
+  html[data-rail="calendar"] #card-calendar,
+  html[data-rail="requests"] #card-requests,
+  html[data-rail="notes"] #card-notes {
+    display: flex;
+  }
+
+  html:not([data-mode="github"]) #card-notes {
+    grid-column: auto;
+  }
+
+  .notes-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rail-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 39;
+    display: block;
+    border-radius: var(--radius);
+    background: var(--backdrop);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 200ms var(--ease);
+  }
+
+  html[data-rail] .rail-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (min-width: 960px) and (max-width: 1099px) and (max-height: 820px) {
+  .rail-tab-label {
+    display: inline;
+  }
+}
+
 /* Phones */
 @media (max-width: 699px) {
   html {
@@ -3853,6 +4088,11 @@ html[data-theme="light"] .toast-action {
 
   .dlg-foot {
     padding-bottom: max(0.85rem, env(safe-area-inset-bottom));
+  }
+
+  /* The sheet already has a close button and a grab handle. */
+  .dlg.setup [data-act="cancel"] {
+    display: none;
   }
 
   .ed-grid,

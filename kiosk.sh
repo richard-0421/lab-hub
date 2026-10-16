@@ -5,15 +5,20 @@
 # wayfire desktops, by their autostart files (scripts/install-pi.sh sets these
 # up). Several of those may fire at once, so only one copy ever runs.
 #
-#   LABHUB_URL          page to open (default http://localhost:<port>, port from
-#                       LABHUB_PORT or config.json, else 8000)
+#   LABHUB_URL          page to open (default http://localhost:<port>; the port
+#                       comes from the app's config loader like run.sh: config.json
+#                       or $LABHUB_CONFIG, LABHUB_PORT in this session, else 8000.
+#                       /etc/default/lab-hub is NOT seen here: keep the port in
+#                       config.json)
 #   LABHUB_KIOSK_FLAGS  extra Chromium flags, space-separated
 #                       (e.g. "--force-device-scale-factor=1.25")
 #   ~/.config/lab-hub-kiosk.flags   the same, kept in a file (one or more flags
 #                       per line, # comments allowed) — easier for autostart
 #
 # Leave the kiosk: Alt+F4 closes it (or Ctrl+Alt+T for a terminal, then
-# `pkill -f lab-hub-kiosk`). Run this script again to bring it back.
+# `pkill -f lab-hub-kiosk`). Bring it back from a terminal with
+#   setsid -f ~/lab-hub/kiosk.sh >/dev/null 2>&1
+# (setsid, not "&": a background job dies when its terminal window closes).
 # Don't edit this file on the Pi: local changes pause the auto-updater.
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
@@ -30,7 +35,12 @@ fi
 # --- which URL --------------------------------------------------------------
 URL="${LABHUB_URL:-}"
 if [ -z "$URL" ]; then
-  PORT="${LABHUB_PORT:-}"
+  PORT=""
+  if [ -x .venv/bin/python ]; then
+    PORT="$(.venv/bin/python -m app.config port 2>/dev/null || true)"
+    case "$PORT" in *[!0-9]*) PORT="" ;; esac
+  fi
+  [ -n "$PORT" ] || PORT="${LABHUB_PORT:-}"
   if [ -z "$PORT" ] && command -v python3 >/dev/null 2>&1; then
     PORT="$(python3 -c '
 import json

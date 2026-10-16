@@ -1,12 +1,11 @@
 // Notes card: sticky notes in a 2-column grid, pinned first then newest.
 
-import { h, reconcile, NodeCache, captureFocus, restoreFocus, autoGrow, armButton } from "./dom.js";
+import { h, reconcile, NodeCache, captureFocus, restoreFocus, autoGrow, armButton, formControl } from "./dom.js";
 import { icon } from "./icons.js";
 import { openDialog, field, colorDots } from "./dialog.js";
 import { NOTE_COLORS, cleanString, opAdd, opDelete, opUpdate } from "../board.js";
 import { perform } from "./actions.js";
 import { quote, relTime } from "./format.js";
-import { getName, setName } from "./prefs.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -14,8 +13,8 @@ export function initNotes(ctx) {
   const body = $("notes-body");
   const count = $("notes-count");
   const form = $("note-form");
-  const bodyIn = form.elements.body;
-  const byIn = form.elements.by;
+  const bodyIn = formControl(form, "body");
+  const byIn = formControl(form, "by");
   const cache = new NodeCache();
   let newColor = "yellow";
 
@@ -111,11 +110,13 @@ export function initNotes(ctx) {
       bodyIn.focus();
       return;
     }
-    const name = setName(byIn.value) || getName();
+    const name = cleanString(byIn.value, 60); // empty field = anonymous
+    ctx.rememberName(name);
     const op = opAdd("notes", { body: text, author: name, color: newColor, pinned: false, rank: 0 }, ctx.by());
     perform(ctx, [op]).then((ok) => {
       if (ok) {
         bodyIn.value = "";
+        if (ctx.kiosk) byIn.value = ""; // shared screen: the next person starts blank
         bodyIn.style.height = "";
         bodyIn.blur();
         form.classList.remove("open");
@@ -176,7 +177,7 @@ export function initNotes(ctx) {
     render,
     refreshRelative,
     setDefaults() {
-      if (!byIn.value) byIn.value = getName();
+      if (!byIn.value) byIn.value = ctx.name();
     },
   };
 }

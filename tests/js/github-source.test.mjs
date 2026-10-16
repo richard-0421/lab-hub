@@ -7,6 +7,8 @@ import * as B from "../../static/js/board.js";
 import { GitHubSource, utf8ToBase64, base64ToUtf8, githubCacheKey } from "../../static/js/sources.js";
 
 const API = "https://api.test";
+const RAW_HOST = "raw.test";
+const RAW = `https://${RAW_HOST}`;
 const REPO = "richard-0417/lab-hub";
 const TOKEN = "test-token";
 const TS = "2026-10-16T14:00:00Z";
@@ -38,6 +40,7 @@ class FakeGitHub {
     this.commits = []; // {branch, message, path}
     this.log = []; // {method, path, status, headers, body}
     this.hooks = []; // {method, contains, fn}
+    this.override = null; // entry => Response | "offline" | null, for EVERY request (after the one-shot hooks)
     this.offline = false;
     this._mkBranch(defaultBranch, new Map([["README.md", "# Lab Hub\n"]]));
     if (dataBranch) this._mkBranch("data", new Map([["README.md", "# Lab Hub\n"]]));
@@ -106,9 +109,34 @@ class FakeGitHub {
         break;
       }
     }
-    const res = this._route(method, u, headers, init.body);
+    if (this.override) {
+      const r = await this.override(entry);
+      if (r instanceof Response) {
+        entry.status = r.status;
+        return r;
+      }
+      if (r === "offline") {
+        entry.status = "offline";
+        throw new TypeError("fetch failed");
+      }
+    }
+    const res = u.host === RAW_HOST ? this._routeRaw(u) : this._route(method, u, headers, init.body);
     entry.status = res.status;
     return res;
+  }
+
+  // raw.githubusercontent.com: /<owner>/<repo>/refs/heads/<branch>/<path>, 404 for private repos.
+  _routeRaw(u) {
+    const prefix = `/${this.repo}/refs/heads/`;
+    const rest = decodeURIComponent(u.pathname);
+    if (this.isPrivate || !rest.startsWith(prefix)) return new Response("404: Not Found", { status: 404 });
+    const tail = rest.slice(prefix.length);
+    for (const [name, files] of this.branches) {
+      if (tail.startsWith(`${name}/`) && files.has(tail.slice(name.length + 1))) {
+        return new Response(files.get(tail.slice(name.length + 1)), { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+      }
+    }
+    return new Response("404: Not Found", { status: 404 });
   }
 
   _auth(headers) {
@@ -320,7 +348,9 @@ describe("GitHubSource", () => {
     let sync = await src.syncNow();
     assert.equal(fake.count("PUT", "/contents/", 409), 3);
     assert.equal(sync.pending, 1);
-    assert.ok(sync.last_error);
+    assert.equal(sync.state, "error", "reported (and backed off), not silently retried every 800 ms");
+    assert.match(sync.last_error, /kept changing on GitHub/);
+    assert.match(sync.last_error, /GitHub: board\.json does not match/, "GitHub's own message is shown");
     sync = await src.syncNow();
     assert.equal(sync.pending, 0);
     assert.equal(sync.last_error, null);
@@ -431,7 +461,9 @@ describe("GitHubSource", () => {
     assert.equal(sync.pending, 1);
     assert.deepEqual(titles(src.board), ["A", "B"]);
     const saved = JSON.parse(storage.getItem("labhub:gh:richard-0417/lab-hub:data:board.json"));
-    assert.equal(saved.pending.length, 1);
+    assert.equal(saved.queue.length, 1);
+    assert.equal(saved.queue[0].op.item.title, "B");
+    assert.equal(typeof saved.queue[0].qid, "string");
     fake.offline = false;
     sync = await src.syncNow();
     assert.equal(sync.state, "ok");
@@ -470,13 +502,14 @@ describe("GitHubSource", () => {
     assert.equal(fake.log.length, n, "stop() clears the timer");
   });
 
-  test("private repo without a token -> error", async () => {
+  test("private repo without a token -> error, without a second (repo) request", async () => {
     const fake = new FakeGitHub({ isPrivate: true });
     seedBoard(fake, { tasks: [task("t-a", "A")] });
     const src = makeSource(fake, { token: "" });
     const sync = await src.syncNow();
     assert.equal(sync.state, "error");
-    assert.equal(sync.last_error, "repo not found, or the token can't see it");
+    assert.match(sync.last_error, /board\.json not found .*private.*add a token/);
+    assert.equal(fake.log.length, 1, "no GET /repos probe: it would cost another unauthenticated request");
   });
 
   test("persistence across instances via storage (pending + cached base + etag)", async () => {
@@ -635,5 +668,460 @@ describe("GitHubSource", () => {
     const sync = await src.syncNow();
     assert.equal(sync.state, "ok", sync.last_error);
     assert.deepEqual(titles(src.board), ["Big"]);
+  });
+});
+
+// ------------------------------------------------- writes GitHub keeps refusing
+
+// Let pending promise chains (fake fetch, Response bodies) run between mocked timer ticks.
+async function settle() {
+  for (let i = 0; i < 25; i++) await new Promise((r) => setImmediate(r));
+}
+
+const PROTECTED = "Repository rule violations found\n\nCannot update this protected ref.";
+
+describe("GitHubSource: failing writes back off", () => {
+  test("a PUT that keeps getting 409 -> state error with GitHub's message, then exponential backoff (no request storm)", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.parse("2026-10-16T14:00:00Z") });
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const putTimes = [];
+    fake.override = (e) => {
+      if (e.method !== "PUT") return null;
+      putTimes.push(Date.now());
+      return jsonRes(409, { message: PROTECTED });
+    };
+    const src = new GitHubSource(settings(), { fetchImpl: fake.fetch, storage: memStorage(), pollMs: 1000, pushDelayMs: 100, maxBackoffMs: 8000 });
+    try {
+      await src.start();
+      await src.submit(addTask("t-b", "B", { rank: 1 }));
+      const t0 = Date.now();
+      for (let ms = 0; ms < 30000; ms += 50) {
+        t.mock.timers.tick(50);
+        await settle();
+      }
+      // 3 attempts per cycle; cycles 100 ms after the submit, then 1, 2, 4, 8, 8 s apart.
+      assert.equal(putTimes.length % 3, 0);
+      const cycles = putTimes.filter((_, i) => i % 3 === 0).map((ts) => ts - t0);
+      const gaps = cycles.slice(1).map((c, i) => c - cycles[i]);
+      assert.deepEqual(gaps.map((g) => Math.round(g / 1000)), [1, 2, 4, 8, 8], `cycle starts: ${cycles}`);
+      assert.ok(putTimes.length <= 18, `${putTimes.length} PUTs in 30 s (was one cycle every 800 ms)`);
+      let sync = src.sync;
+      assert.equal(sync.state, "error");
+      assert.equal(sync.pending, 1, "the op is kept");
+      assert.match(sync.last_error, /Cannot update this protected ref/);
+      // GitHub accepts writes again: pushed on the next (backed-off) cycle, then normal polling resumes.
+      fake.override = null;
+      for (let ms = 0; ms < 8100 && src.sync.pending; ms += 50) {
+        t.mock.timers.tick(50);
+        await settle();
+      }
+      sync = src.sync;
+      assert.equal(sync.state, "ok", sync.last_error);
+      assert.equal(sync.pending, 0);
+      assert.deepEqual(titles(fake.getBoard()), ["A", "B"]);
+      const n = fake.log.length;
+      t.mock.timers.tick(1050);
+      await settle();
+      assert.equal(fake.log.length, n + 1, "back to the normal poll interval after a success");
+    } finally {
+      src.stop();
+    }
+  });
+
+  test("submit() cuts a backoff short (like the Pi's kick)", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.parse("2026-10-16T14:00:00Z") });
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    fake.override = (e) => (e.method === "PUT" ? jsonRes(409, { message: PROTECTED }) : null);
+    const src = new GitHubSource(settings(), { fetchImpl: fake.fetch, storage: memStorage(), pollMs: 1000, pushDelayMs: 100, maxBackoffMs: 60000 });
+    try {
+      await src.start();
+      await src.submit(addTask("t-b", "B", { rank: 1 }));
+      for (let ms = 0; ms < 8000; ms += 50) {
+        t.mock.timers.tick(50);
+        await settle();
+      }
+      assert.equal(src.sync.state, "error");
+      fake.override = null;
+      await src.submit(addTask("t-c", "C", { rank: 2 }));
+      t.mock.timers.tick(150);
+      await settle();
+      assert.equal(src.sync.pending, 0, src.sync.last_error);
+      assert.deepEqual(titles(fake.getBoard()), ["A", "B", "C"]);
+    } finally {
+      src.stop();
+    }
+  });
+
+  test("a 422 that is neither a sha conflict nor a missing branch is an error at once (no branch creation)", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    fake.override = (e) => (e.method === "PUT" ? jsonRes(422, { message: PROTECTED }) : null);
+    const src = makeSource(fake);
+    await src.submit(addTask("t-b", "B"));
+    const sync = await src.syncNow();
+    assert.equal(sync.state, "error");
+    assert.equal(sync.last_error, `GitHub rejected the write (422): ${PROTECTED}`);
+    assert.equal(fake.count("PUT"), 1);
+    assert.equal(fake.count("POST", "/git/refs"), 0);
+    assert.equal(fake.count("GET", "/git/ref/"), 0);
+    assert.equal(sync.pending, 1);
+  });
+
+  test("a 404 on PUT that isn't 'branch not found' -> token permission error, no branch creation", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    fake.override = (e) => (e.method === "PUT" ? jsonRes(404, { message: "Not Found" }) : null);
+    const src = makeSource(fake);
+    await src.submit(addTask("t-b", "B"));
+    const sync = await src.syncNow();
+    assert.equal(sync.state, "error");
+    assert.match(sync.last_error, /^GitHub refused the write \(404\): Not Found — check the token has Contents: read & write/);
+    assert.equal(fake.count("POST", "/git/refs"), 0);
+  });
+
+  test("the branch is created at most once per cycle", async () => {
+    const fake = new FakeGitHub({ dataBranch: false });
+    fake.override = (e) => (e.method === "PUT" ? jsonRes(404, { message: "Branch data not found" }) : null);
+    const src = makeSource(fake);
+    await src.submit(addTask("t-b", "B"));
+    const sync = await src.syncNow();
+    assert.equal(fake.count("POST", "/git/refs"), 1);
+    assert.equal(fake.count("PUT"), 2);
+    assert.equal(sync.state, "error");
+    assert.match(sync.last_error, /Branch data not found/);
+  });
+});
+
+// ------------------------------------------------------- stalled response bodies
+
+const stalled = (status = 200) => new Response(new ReadableStream({ start() {} }), { status, headers: { "content-type": "application/json" } });
+
+describe("GitHubSource: the request timeout covers the body", () => {
+  test("a GET whose body never arrives ends the cycle as offline after timeoutMs", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    fake.onNext("GET", "/contents/", () => stalled());
+    const src = makeSource(fake, { timeoutMs: 60 });
+    const t0 = Date.now();
+    const sync = await src.syncNow();
+    assert.ok(Date.now() - t0 < 2000);
+    assert.equal(sync.state, "offline");
+    const ok = await src.syncNow();
+    assert.equal(ok.state, "ok", ok.last_error);
+    assert.deepEqual(titles(src.board), ["A"]);
+  });
+
+  test("a PUT whose body never arrives: op kept, the next cycle settles it without a duplicate commit", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const src = makeSource(fake, { timeoutMs: 60 });
+    await src.syncNow();
+    await src.submit(addTask("t-b", "B", { rank: 1 }));
+    fake.onNext("PUT", "/contents/", async (e) => {
+      const res = fake._route("PUT", new URL(API + e.path), e.headers, e.body); // GitHub commits it...
+      assert.equal(res.status, 200);
+      return stalled(); // ...but the reply body is lost
+    });
+    let sync = await src.syncNow();
+    assert.equal(sync.state, "offline");
+    assert.equal(sync.pending, 1);
+    sync = await src.syncNow();
+    assert.equal(sync.state, "ok", sync.last_error);
+    assert.equal(sync.pending, 0);
+    assert.equal(fake.commits.filter((c) => c.message.startsWith("test:")).length, 1, "one commit");
+    assert.deepEqual(titles(fake.getBoard()), ["A", "B"]);
+  });
+
+  test("stop() aborts a stalled body read, so syncNow() settles", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    fake.onNext("GET", "/contents/", () => stalled());
+    const src = makeSource(fake, { timeoutMs: 1e9 });
+    const p = src.syncNow();
+    await sleep(20);
+    src.stop();
+    const r = await Promise.race([p.then(() => "settled"), sleep(1000).then(() => "hung")]);
+    assert.equal(r, "settled");
+  });
+});
+
+// ------------------------------------------------------------ two tabs, one queue
+
+const KEY = "labhub:gh:richard-0417/lab-hub:data:board.json";
+const stored = (storage) => JSON.parse(storage.getItem(KEY));
+
+describe("GitHubSource: tabs sharing one localStorage key", () => {
+  test("a tab's unpushed op survives another tab's writes and is pushed after the first tab closes", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const storage = memStorage();
+    const tabA = makeSource(fake, { storage });
+    const tabB = makeSource(fake, { storage });
+    await tabA.syncNow();
+    await tabB.syncNow();
+    fake.override = (e) => (e.method === "PUT" ? jsonRes(502, { message: "Server Error" }) : null);
+    await tabA.submit(addTask("t-x", "Order pipettes", { rank: 1 }));
+    await tabA.syncNow();
+    assert.equal(stored(storage).queue.length, 1);
+    seedBoard(fake, { tasks: [task("t-a", "A (pi)")] }); // the Pi commits; tab B's poll writes the shared record
+    await tabB.syncNow();
+    assert.equal(stored(storage).queue.length, 1, "tab B kept tab A's queued op");
+    tabA.stop(); // the user closes tab A before it could push
+    tabB.stop();
+    fake.override = null;
+    const reopened = makeSource(fake, { storage });
+    assert.deepEqual(titles(reopened.board), ["A (pi)", "Order pipettes"]);
+    await reopened.syncNow();
+    assert.deepEqual(titles(fake.getBoard()), ["A (pi)", "Order pipettes"]);
+    assert.equal(reopened.sync.pending, 0);
+  });
+
+  test("edits made offline in two tabs are both kept", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const storage = memStorage();
+    const tabA = makeSource(fake, { storage });
+    const tabB = makeSource(fake, { storage });
+    await tabA.syncNow();
+    await tabB.syncNow();
+    fake.offline = true;
+    await tabA.submit(addTask("t-x", "From tab A", { rank: 1 }));
+    await tabB.submit(addTask("t-y", "From tab B", { rank: 2 }));
+    tabA.stop();
+    tabB.stop();
+    fake.offline = false;
+    const reopened = makeSource(fake, { storage });
+    await reopened.syncNow();
+    assert.deepEqual(titles(fake.getBoard()), ["A", "From tab A", "From tab B"]);
+  });
+
+  test("an op pushed by one tab is not pushed again by the tab that adopted it ('storage' event + done ids)", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const storage = memStorage();
+    const win = new EventTarget();
+    const storageEvent = () => Object.assign(new Event("storage"), { key: KEY });
+    globalThis.window = win;
+    const tabA = makeSource(fake, { storage });
+    const tabB = makeSource(fake, { storage });
+    try {
+      await tabA.start();
+      await tabB.start();
+      await tabA.submit(addTask("t-x", "X", { rank: 1 }));
+      win.dispatchEvent(storageEvent()); // what the browser tells tab B
+      assert.equal(tabB.sync.pending, 1, "tab B adopted tab A's queued op");
+      assert.deepEqual(titles(tabB.board), ["A", "X"]);
+      await tabA.syncNow();
+      assert.equal(fake.count("PUT"), 1);
+      win.dispatchEvent(storageEvent());
+      assert.equal(tabB.sync.pending, 0, "tab B learnt it was pushed");
+      assert.deepEqual(titles(tabB.board), ["A", "X"], "and still shows it");
+      await tabB.syncNow();
+      assert.equal(fake.count("PUT"), 1, "tab B does not push it again");
+      assert.deepEqual(titles(tabB.board), ["A", "X"]);
+      assert.deepEqual(stored(storage).queue, []);
+    } finally {
+      tabA.stop();
+      tabB.stop();
+      delete globalThis.window;
+    }
+  });
+
+  test("ops stored by the previous format (no queue ids) are restored and pushed", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const storage = memStorage();
+    storage.setItem(KEY, JSON.stringify({ v: 1, base: null, sha: null, etag: null, pending: [addTask("t-old", "Old", { rank: 1 }), { bogus: true }] }));
+    const src = makeSource(fake, { storage });
+    assert.equal(src.sync.pending, 1);
+    await src.syncNow();
+    assert.deepEqual(titles(fake.getBoard()), ["A", "Old"]);
+    assert.deepEqual(stored(storage).queue, []);
+    assert.equal(stored(storage).done.length, 1);
+  });
+});
+
+// ------------------------------------------------------------- page lifecycle
+
+function fakePage() {
+  const doc = new EventTarget();
+  doc.visibilityState = "visible";
+  const win = new EventTarget();
+  globalThis.document = doc;
+  globalThis.window = win;
+  return {
+    doc,
+    win,
+    hide() {
+      doc.visibilityState = "hidden";
+      doc.dispatchEvent(new Event("visibilitychange"));
+    },
+    show() {
+      doc.visibilityState = "visible";
+      doc.dispatchEvent(new Event("visibilitychange"));
+    },
+    restore() {
+      delete globalThis.document;
+      delete globalThis.window;
+    },
+  };
+}
+
+describe("GitHubSource: page lifecycle", () => {
+  test("hiding the page pushes queued edits at once (no waiting for the debounce)", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const page = fakePage();
+    const src = makeSource(fake); // pushDelayMs: 1e9
+    try {
+      await src.start();
+      await src.submit(addTask("t-b", "B", { rank: 1 }));
+      await sleep(20);
+      assert.equal(fake.count("PUT"), 0);
+      page.hide();
+      await sleep(50);
+      assert.equal(fake.count("PUT"), 1);
+      assert.equal(src.sync.pending, 0);
+      assert.deepEqual(titles(fake.getBoard()), ["A", "B"]);
+    } finally {
+      src.stop();
+      page.restore();
+    }
+  });
+
+  test("pagehide pushes queued edits too; nothing is sent when the queue is empty", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const page = fakePage();
+    const src = makeSource(fake);
+    try {
+      await src.start();
+      const n = fake.log.length;
+      page.win.dispatchEvent(new Event("pagehide"));
+      page.hide();
+      await sleep(20);
+      assert.equal(fake.log.length, n, "no pending ops: no request");
+      page.show();
+      await src.submit(addTask("t-b", "B", { rank: 1 }));
+      page.win.dispatchEvent(new Event("pagehide"));
+      await sleep(50);
+      assert.equal(fake.count("PUT"), 1);
+    } finally {
+      src.stop();
+      page.restore();
+    }
+  });
+});
+
+// ------------------------------------------------------------ read-only viewers
+
+describe("GitHubSource: read-only (no token)", () => {
+  test("reads board.json from the raw host with a plain GET (no API quota, no CORS preflight)", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const src = makeSource(fake, { token: "", rawBase: RAW });
+    let sync = await src.syncNow();
+    assert.equal(sync.state, "readonly", sync.last_error);
+    assert.deepEqual(titles(src.board), ["A"]);
+    assert.equal(fake.log.length, 1);
+    assert.equal(fake.log[0].path, `/${REPO}/refs/heads/data/board.json`);
+    assert.deepEqual(fake.log[0].headers, {}, "no Authorization / Accept / API-version headers");
+    const before = src.board;
+    await src.syncNow();
+    assert.equal(src.board, before, "unchanged file: same board");
+    seedBoard(fake, { tasks: [task("t-a", "A"), task("t-b", "B", { rank: 1 })] });
+    sync = await src.syncNow();
+    assert.deepEqual(titles(src.board), ["A", "B"]);
+    assert.equal(fake.count(null, "/repos/"), 0, "never touched the API");
+  });
+
+  test("raw 404 (missing file or private repo) -> one message, no second request", async () => {
+    const fake = new FakeGitHub({ isPrivate: true });
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const src = makeSource(fake, { token: "", rawBase: RAW });
+    const sync = await src.syncNow();
+    assert.equal(sync.state, "error");
+    assert.match(sync.last_error, /not found .*add a token/);
+    assert.equal(fake.log.length, 1);
+  });
+
+  test("raw host unreachable (blocked network) -> falls back to the API", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    fake.override = (e) => (e.path.startsWith(`/${REPO}/refs/`) ? "offline" : null);
+    const src = makeSource(fake, { token: "", rawBase: RAW });
+    let sync = await src.syncNow();
+    assert.equal(sync.state, "readonly", sync.last_error);
+    assert.deepEqual(titles(src.board), ["A"]);
+    const n = fake.log.length;
+    sync = await src.syncNow();
+    assert.equal(fake.log.length, n + 1);
+    assert.match(fake.log.at(-1).path, /^\/repos\//, "keeps using the API once the raw host failed");
+  });
+
+  test("with the real api.github.com the raw host is raw.githubusercontent.com", async () => {
+    const urls = [];
+    const text = B.serializeBoard(B.normalizeBoard({ tasks: [task("t-a", "A")] }));
+    const fetchImpl = async (url, init) => {
+      urls.push({ url, init });
+      return new Response(text, { status: 200 });
+    };
+    const src = new GitHubSource({ repo: REPO, branch: "data", path: "board.json", token: "" }, { fetchImpl, storage: memStorage() });
+    const sync = await src.syncNow();
+    assert.equal(sync.state, "readonly", sync.last_error);
+    assert.equal(urls[0].url, "https://raw.githubusercontent.com/richard-0417/lab-hub/refs/heads/data/board.json");
+    assert.equal(urls[0].init.headers, undefined);
+  });
+
+  test("tab switches / 'online' don't trigger extra reads within a minute", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.parse("2026-10-16T14:00:00Z") });
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: [task("t-a", "A")] });
+    const page = fakePage();
+    const src = makeSource(fake, { token: "", rawBase: RAW });
+    try {
+      await src.start();
+      const n = fake.log.length;
+      t.mock.timers.tick(10000);
+      page.hide();
+      page.show();
+      page.win.dispatchEvent(new Event("online"));
+      await settle();
+      assert.equal(fake.log.length, n, "10 s after the last read: no new read");
+      t.mock.timers.tick(55000);
+      page.show();
+      await settle();
+      assert.equal(fake.log.length, n + 1, "over a minute later: read again");
+    } finally {
+      src.stop();
+      page.restore();
+    }
+  });
+});
+
+// ------------------------------------------------------------- unsafe settings
+
+describe("GitHubSource: settings that would leave /repos/<repo>/contents/", () => {
+  test("a path with '..' parts is refused before any request", async () => {
+    for (const path of ["../pulls/5/merge", "a/../../pulls/5/merge", "./board.json", "a//b.json", "a\\b.json", "%2e%2e/x"]) {
+      const fake = new FakeGitHub();
+      const src = new GitHubSource(settings({ path }), { fetchImpl: fake.fetch, storage: memStorage(), pollMs: 1e9, pushDelayMs: 1e9 });
+      const sync = await src.syncNow();
+      assert.equal(sync.state, "error", path);
+      assert.match(sync.last_error, /file path/, path);
+      assert.equal(fake.log.length, 0, path);
+    }
+  });
+
+  test("a branch or repo with '..' is refused before any request", async () => {
+    for (const extra of [{ branch: "../main" }, { branch: "a..b" }, { branch: ".hidden" }, { repo: "../.." }, { repo: "richard-0417/.." }]) {
+      const fake = new FakeGitHub();
+      const src = new GitHubSource(settings(extra), { fetchImpl: fake.fetch, storage: memStorage(), pollMs: 1e9, pushDelayMs: 1e9 });
+      const sync = await src.syncNow();
+      assert.equal(sync.state, "error", JSON.stringify(extra));
+      assert.equal(fake.log.length, 0, JSON.stringify(extra));
+    }
   });
 });

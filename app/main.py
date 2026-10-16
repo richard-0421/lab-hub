@@ -11,29 +11,43 @@
 
 Run:  python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 Tests build their own app with create_app(load_config(...)).
+
+Anyone on the LAN may edit (no login, by design), but other web sites may
+not: every request must name this server by localhost, an IP address, this
+machine's hostname or a configured ``allowed_hosts`` entry (stops DNS
+rebinding), and a write to /api/* is refused when the browser says it comes
+from another site (Origin / Sec-Fetch-Site). POST /api/ops also requires
+``Content-Type: application/json``, which a cross-site form or no-cors fetch
+cannot send without a CORS preflight.
 """
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
+import threading
+import time
+import urllib.parse
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import calendar_feed, migrate
 from .config import BASE_DIR, github_enabled, load_config
 from .github_sync import SyncWorker
-from .store import OpError, Store
+from .store import OpError, Store, StoreUnavailable
 
 log = logging.getLogger("labhub")
 
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 MAX_OPS_PER_REQUEST = 500
+MAX_BODY_BYTES = 2 * 1024 * 1024   # POST /api/ops; 500 real ops are far smaller
 
 
 class SafeJSONResponse(JSONResponse):
@@ -130,6 +144,150 @@ def compute_version(repo_dir, static_dir):
 
 
 # --------------------------------------------------------------------------- #
+# LAN address (shown on the kiosk, which itself runs on localhost)
+# --------------------------------------------------------------------------- #
+LAN_CACHE_SECONDS = 60.0
+_lan_cache = {"at": None, "ip": None}
+_lan_lock = threading.Lock()
+
+
+def clear_lan_cache():
+    with _lan_lock:
+        _lan_cache["at"] = None
+        _lan_cache["ip"] = None
+
+
+def primary_lan_ipv4(sock_factory=None):
+    """This machine's primary IPv4 address (the source address of its default
+    route), or None. connect() on a UDP socket only consults the routing
+    table: no packet is sent. Cached for LAN_CACHE_SECONDS."""
+    now = time.monotonic()
+    with _lan_lock:
+        if _lan_cache["at"] is not None and now - _lan_cache["at"] < LAN_CACHE_SECONDS:
+            return _lan_cache["ip"]
+    ip = None
+    try:
+        sock = (sock_factory or socket.socket)(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+        finally:
+            sock.close()
+    except OSError:
+        ip = None
+    if not isinstance(ip, str) or not ip or ip.startswith("127.") or ip == "0.0.0.0":
+        ip = None
+    with _lan_lock:
+        _lan_cache["at"] = now
+        _lan_cache["ip"] = ip
+    return ip
+
+
+def lan_url(cfg, port=None):
+    """``http://<LAN IPv4>:<port>`` for teammates, or None (bound to loopback
+    only, or no LAN address)."""
+    host = (cfg.get("host") or "").strip().strip("[]").lower()
+    if host == "localhost":
+        return None
+    ip = None
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        addr = None  # empty, or a host name: use the default-route address
+    if addr is not None:
+        if addr.is_loopback:
+            return None
+        if addr.version == 4 and not addr.is_unspecified:
+            ip = host  # bound to one specific address
+    ip = ip or primary_lan_ipv4()
+    if not ip:
+        return None
+    port = int(port or cfg.get("port") or 80)
+    return "http://%s" % ip if port == 80 else "http://%s:%d" % (ip, port)
+
+
+# --------------------------------------------------------------------------- #
+# request guard (DNS rebinding / cross-site writes)
+# --------------------------------------------------------------------------- #
+_UNSAFE_METHODS = frozenset(("POST", "PUT", "PATCH", "DELETE"))
+_DEFAULT_PORT = {"http": "80", "https": "443"}
+
+
+def split_host(value):
+    """('host', 'port') from a Host header value (lower-case, port may be '')."""
+    v = (value or "").strip().lower()
+    if v.startswith("["):
+        end = v.find("]")
+        if end < 0:
+            return v, ""
+        return v[1:end], v[end + 1:].lstrip(":")
+    if v.count(":") == 1:
+        host, _, port = v.partition(":")
+        return host.rstrip("."), port
+    return v.rstrip("."), ""
+
+
+def local_host_names():
+    """Names this machine answers to besides IP addresses."""
+    names = {"localhost"}
+    try:
+        hn = socket.gethostname().strip().lower().rstrip(".")
+    except OSError:
+        hn = ""
+    if hn:
+        short = hn.split(".")[0]
+        names.update((hn, hn + ".local", short, short + ".local"))
+    return names
+
+
+def host_allowed(host, names, extra=()):
+    """May a browser reach us under this Host name? IP literals, localhost,
+    our own names and ``allowed_hosts`` entries ("." prefix = subdomains,
+    "*" = anything). A DNS-rebinding page always uses its own domain."""
+    if not host or host in names or host == "localhost" or host.endswith(".localhost"):
+        return True
+    for entry in extra:
+        if entry == "*" or entry == host or (entry.startswith(".") and host.endswith(entry)):
+            return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def same_origin(origin, host_header, scheme="http"):
+    """Does the Origin header name this very server (scheme host:port)?"""
+    try:
+        o = urllib.parse.urlsplit(origin)
+        o_port = str(o.port) if o.port is not None else _DEFAULT_PORT.get(o.scheme)
+    except ValueError:
+        return False
+    if o.scheme != scheme or not o.hostname or not o_port:
+        return False
+    host, port = split_host(host_header)
+    return (o.hostname.lower().rstrip("."), o_port) == (host, port or _DEFAULT_PORT.get(scheme, "80"))
+
+
+async def read_body(request, limit):
+    """The request body, or None when it is longer than ``limit`` bytes."""
+    length = request.headers.get("content-length")
+    if length is not None:
+        try:
+            if int(length) > limit:
+                return None
+        except ValueError:
+            return None
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+# --------------------------------------------------------------------------- #
 # app factory
 # --------------------------------------------------------------------------- #
 def _setup_logging():
@@ -168,8 +326,8 @@ def public_config(cfg):
     }
 
 
-def _bad_request(message, index=None):
-    return SafeJSONResponse({"error": message, "index": index}, status_code=400)
+def _bad_request(message, index=None, status=400):
+    return SafeJSONResponse({"error": message, "index": index}, status_code=status)
 
 
 def create_app(cfg=None, static_dir=None, repo_dir=None):
@@ -220,6 +378,31 @@ def create_app(cfg=None, static_dir=None, repo_dir=None):
     )
     app.state.config = cfg
     app.state.version = version
+    host_names = local_host_names()
+    extra_hosts = tuple(cfg.get("allowed_hosts") or ())
+
+    # registered before cache_headers, so that one wraps it (Starlette runs
+    # the last registered middleware first)
+    @app.middleware("http")
+    async def request_guard(request, call_next):
+        path = request.url.path
+        is_api = path == "/api" or path.startswith("/api/")
+        host_header = request.headers.get("host")
+        host = split_host(host_header)[0]
+        if not host_allowed(host, host_names, extra_hosts):
+            msg = ("this Lab Hub does not answer to the host name %r; use its IP address, or add the name "
+                   "to allowed_hosts in config.json" % host[:100])
+            if is_api:
+                return _bad_request(msg)
+            return PlainTextResponse(msg + "\n", status_code=400)
+        if is_api and request.method in _UNSAFE_METHODS:
+            site = (request.headers.get("sec-fetch-site") or "").lower()
+            origin = request.headers.get("origin")
+            if site in ("cross-site", "same-site") or (
+                origin is not None and not same_origin(origin, host_header, request.url.scheme)
+            ):
+                return _bad_request("cross-site request refused", status=403)
+        return await call_next(request)
 
     @app.middleware("http")
     async def cache_headers(request, call_next):
@@ -232,8 +415,15 @@ def create_app(cfg=None, static_dir=None, repo_dir=None):
         return response
 
     @app.get("/api/config")
-    def api_config():
-        return SafeJSONResponse(config_body)
+    def api_config(request: Request):
+        body = dict(config_body)
+        try:
+            server = request.scope.get("server")
+            body["lan_url"] = lan_url(cfg, server[1] if server else None)
+        except Exception:  # noqa: BLE001 - never let this break the page's config
+            log.debug("could not work out the LAN address", exc_info=True)
+            body["lan_url"] = None
+        return SafeJSONResponse(body)
 
     @app.get("/api/board")
     def api_board(request: Request, rev: Optional[str] = None):
@@ -247,7 +437,12 @@ def create_app(cfg=None, static_dir=None, repo_dir=None):
 
     @app.post("/api/ops")
     async def api_ops(request: Request):
-        raw = await request.body()
+        ctype = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if ctype != "application/json":
+            return _bad_request("Content-Type must be application/json", status=415)
+        raw = await read_body(request, MAX_BODY_BYTES)
+        if raw is None:
+            return _bad_request("request body too large (at most %d bytes)" % MAX_BODY_BYTES, status=413)
         try:
             body = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -264,6 +459,8 @@ def create_app(cfg=None, static_dir=None, repo_dir=None):
             result = await run_in_threadpool(store.submit, ops)
         except OpError as exc:
             return _bad_request(exc.message, exc.index)
+        except StoreUnavailable as exc:
+            return _bad_request(exc.message, status=503)
         worker = request.app.state.worker
         if worker is not None:
             worker.kick()

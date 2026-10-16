@@ -329,6 +329,12 @@ def _coerce(spec, value, default_ts=None):
     raise ValueError("unknown field kind %r" % (kind,))
 
 
+def coerce_field(coll, key, value):
+    """``value`` coerced for field ``key`` of ``coll`` exactly as apply does
+    (clamped strings, canonical timestamps, ...)."""
+    return _coerce(_SPEC[coll][key], value)
+
+
 def _sort_key(item):
     return (item["rank"], item["id"])
 
@@ -479,6 +485,11 @@ def _apply_in_place(board, op):
     if kind == "add":
         item = normalize_item(coll, op["item"], 0, default_ts=ts)
         if item is None or _find(items, item["id"]) is not None:
+            return False
+        if len(items) >= MAX_ITEMS:
+            # A full collection takes no more items. Appending would push a
+            # file that normalization later truncates, silently deleting
+            # whichever existing item sorts last.
             return False
         items.append(item)
         items.sort(key=_sort_key)

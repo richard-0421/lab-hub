@@ -1,19 +1,20 @@
 {
-  "_comment": "Copy to config.json (scripts/install-pi.sh does this for you). Every key is optional; LABHUB_<KEY> env vars override. Prefer the LABHUB_GITHUB_TOKEN env var (or install-pi.sh, which chmods config.json to 600) over typing the token here. See README.md > Configuration.",
+  "_comment": "Copy to config.json (scripts/install-pi.sh does this for you). Every key is optional; LABHUB_<KEY> env vars override. github_repo is the separate DATA repo that holds board.json, not the code repo lab-hub. pages_url is the Pages site (published from the code repo) with ?repo= so new browsers pre-fill the data repo. Keep host/port here, not in /etc/default/lab-hub. Prefer the LABHUB_GITHUB_TOKEN env var (or install-pi.sh, which chmods config.json to 600) over typing the token here. See README.md > Configuration.",
   "name": "Lab Hub",
   "host": "0.0.0.0",
   "port": 8000,
   "theme": "dark",
   "calendar_ics": "",
   "calendar_max_events": 8,
-  "github_repo": "richard-0417/lab-hub",
+  "github_repo": "richard-0417/lab-hub-data",
   "github_branch": "data",
   "github_path": "board.json",
   "github_token": "",
   "github_api": "https://api.github.com",
   "sync_interval": 15,
   "client_name": "lab-pi",
-  "pages_url": "",
+  "pages_url": "https://richard-0417.github.io/lab-hub/?repo=richard-0417/lab-hub-data",
   "state_dir": "state",
-  "db_path": "labhub.db"
+  "db_path": "labhub.db",
+  "allowed_hosts": []
 }

@@ -18,7 +18,9 @@ User=__USER__
 WorkingDirectory=__APP_DIR__
 Environment=PYTHONUNBUFFERED=1
 # Optional extra settings, e.g. LABHUB_GITHUB_TOKEN=github_pat_...
-# (one KEY=value per line; keep the file root-owned, mode 600).
+# (one KEY=value per line; keep the file root-owned, mode 600). Only this
+# service reads it: keep "host"/"port" in config.json, which kiosk.sh and
+# install-pi.sh read too.
 EnvironmentFile=-/etc/default/lab-hub
 ExecStart=/bin/bash "__APP_DIR__/run.sh" --service
 Restart=always

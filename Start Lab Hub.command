@@ -60,8 +60,11 @@ if ! "$VPY" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
   git hash-object requirements.txt > "$VENV/.labhub-requirements" 2>/dev/null || true
 fi
 
-# 4) port: LABHUB_PORT, else config.json "port", else 8000 --------------------
-PORT="${LABHUB_PORT:-$("$VPY" -c '
+# 4) port: the app's own config loader (config.json or $LABHUB_CONFIG, then
+#    LABHUB_PORT), like run.sh; else config.json "port", else 8000 ------------
+PORT="$("$VPY" -m app.config port 2>/dev/null || true)"
+case "$PORT" in ''|*[!0-9]*) PORT="" ;; esac
+[ -n "$PORT" ] || PORT="${LABHUB_PORT:-$("$VPY" -c '
 import json
 try:
     print(int(json.load(open("config.json", encoding="utf-8")).get("port") or 8000))

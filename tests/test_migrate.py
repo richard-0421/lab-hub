@@ -14,7 +14,9 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from app import migrate  # noqa: E402
+from app.github_sync import SyncWorker  # noqa: E402
 from app.store import Store  # noqa: E402
+from tests.mock_github import MockGitHub  # noqa: E402
 
 logging.getLogger("labhub").setLevel(logging.CRITICAL)
 
@@ -170,6 +172,68 @@ class MigrateTests(unittest.TestCase):
         self.assertEqual(migrate.legacy_time_to_utc("2026-07-01T09:00:00+02:00"), "2026-07-01T07:00:00Z")
         self.assertIsNone(migrate.legacy_time_to_utc("garbage"))
         self.assertIsNone(migrate.legacy_time_to_utc(None))
+
+
+
+class ReimportTests(unittest.TestCase):
+    """A second import (new clone / empty state/, same labhub.db) must not
+    bring back legacy items deleted on GitHub since the first one."""
+
+    REPO = "richard-0417/lab-hub"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="labhub-reimport-")
+        self.db = os.path.join(self.tmp, "labhub.db")
+        con = sqlite3.connect(self.db)
+        con.executescript(LEGACY_SCHEMA)
+        con.executemany("INSERT INTO tasks(text, done, created_at) VALUES(?,?,?)", [
+            ("Calibrate pump", 0, "2026-07-01T09:00:00"),
+            ("Order tips", 1, "2026-07-02T10:30:00"),
+        ])
+        con.commit()
+        con.close()
+        self.mock = MockGitHub(repo=self.REPO, token="t").start()
+        self.cfg = {"github_repo": self.REPO, "github_branch": "data", "github_path": "board.json",
+                    "github_token": "t", "github_api": self.mock.url, "client_name": "lab-pi"}
+
+    def tearDown(self):
+        self.mock.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def install(self, name):
+        """A fresh install: its own state/ folder, the same legacy db."""
+        state = os.path.join(self.tmp, name)
+        store = Store(state, github_enabled=True, repo=self.REPO, api=self.mock.url)
+        n = migrate.run_migration({"db_path": self.db, "state_dir": state}, store)
+        return store, SyncWorker(store, self.cfg), n
+
+    def remote_ids(self):
+        return sorted(t["id"] for t in self.mock.get_file_json("data", "board.json")["tasks"])
+
+    def test_deleted_legacy_items_stay_deleted(self):
+        store, worker, n = self.install("state1")
+        self.assertEqual(n, 2)
+        self.assertEqual(worker.sync_once()["state"], "ok")
+        self.assertEqual(self.remote_ids(), ["t-legacy-1", "t-legacy-2"])
+        store.submit([{"op": "delete", "coll": "tasks", "id": "t-legacy-2", "ts": "2026-10-16T14:00:00Z"}])
+        worker.sync_once()
+        self.assertEqual(self.remote_ids(), ["t-legacy-1"])
+
+        store2, worker2, n2 = self.install("state2")
+        self.assertEqual(n2, 2)
+        store2.submit([{"op": "add", "coll": "tasks", "item": {"id": "t-new", "title": "New"},
+                        "ts": "2026-10-16T14:00:00Z"}])
+        status = worker2.sync_once()
+        self.assertEqual(status["state"], "ok")
+        self.assertEqual(status["pending"], 0)
+        self.assertEqual(self.remote_ids(), ["t-legacy-1", "t-new"])
+        self.assertEqual(sorted(t["id"] for t in store2.view()["tasks"]), ["t-legacy-1", "t-new"])
+
+    def test_first_import_still_reaches_github(self):
+        store, worker, _ = self.install("state1")
+        self.mock.set_file_text("data", "board.json", '{"tasks": [{"id": "t-web", "title": "Web"}]}')
+        self.assertEqual(worker.sync_once()["pending"], 0)
+        self.assertEqual(self.remote_ids(), ["t-legacy-1", "t-legacy-2", "t-web"])
 
 
 if __name__ == "__main__":

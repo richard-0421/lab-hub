@@ -51,6 +51,42 @@ describe("parseQuickAdd", () => {
     assert.deepEqual(q("x #").tags, []);
   });
 
+  test("trailing punctuation after @name / #tag / due goes with the token", () => {
+    assert.deepEqual(q("Probe quick add @mei !high #bio, ^tomorrow"), {
+      title: "Probe quick add",
+      assignee: "mei",
+      priority: "high",
+      tags: ["bio"],
+      due: "2026-10-15",
+    });
+    const ask = q("Ask @mei, then order tips");
+    assert.equal(ask.assignee, "mei");
+    assert.equal(ask.title, "Ask then order tips");
+    assert.deepEqual(q("Order tips #bio.").tags, ["bio"]);
+    assert.equal(q("Order tips #bio.").title, "Order tips");
+    assert.deepEqual(q("Tag #bio; @mei:"), { title: "Tag", assignee: "mei", priority: null, tags: ["bio"], due: "" });
+    assert.deepEqual(q("x #a) #b] #c?! #d").tags, ["a", "b", "c", "d"]);
+    assert.equal(q("ask @j.doe.").assignee, "j.doe");
+    const due = q("Run gel ^fri.");
+    assert.equal(due.due, "2026-10-16");
+    assert.equal(due.title, "Run gel");
+    assert.equal(q("Run gel due:10/30,").due, "2026-10-30");
+    assert.equal(q("Order tips !high, @mei").title, "Order tips");
+    assert.equal(q("Order tips !high, @mei").priority, "high");
+    assert.equal(q("x !!.").priority, "high");
+    assert.equal(q("wow!, great").title, "wow!, great");
+  });
+
+  test("words that still aren't tokens after the punctuation is stripped stay as typed", () => {
+    assert.equal(q("sample #2, done").title, "sample #2, done");
+    assert.deepEqual(q("sample #2, done").tags, []);
+    assert.equal(q("C#, Rust").title, "C#, Rust");
+    assert.equal(q("mail bob@example.com.").title, "mail bob@example.com.");
+    assert.equal(q("mail bob@example.com.").assignee, "");
+    assert.equal(q("x @, y #; z").title, "x @, y #; z");
+    assert.equal(q("Run gel ^someday.").title, "Run gel ^someday.");
+  });
+
   test("due keywords", () => {
     const cases = {
       "due:today": "2026-10-14",

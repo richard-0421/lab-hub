@@ -7,8 +7,9 @@
 #   cd ~/lab-hub && ./scripts/install-pi.sh
 #
 # Options:
-#   --repo OWNER/NAME   GitHub repo holding board.json (default richard-0417/lab-hub;
-#                       "none" = local-only, no GitHub sync)
+#   --repo OWNER/NAME   GitHub DATA repo holding board.json (default
+#                       richard-0417/lab-hub-data; "none" = local-only, no sync).
+#                       Not the code repo: the Pi pulls code anonymously.
 #   --name TEXT         dashboard title (default "Lab Hub")
 #   --ics URL           published Outlook calendar .ics URL ("none" clears it)
 #   --token-file FILE   read the GitHub token from FILE instead of prompting
@@ -21,13 +22,20 @@
 #   -h, --help          show this help
 #
 # What it does: checks prerequisites, makes .venv and installs requirements,
-# writes config.json (mode 600), installs + starts lab-hub.service and the
-# lab-hub-update.timer auto-updater, sets up kiosk autostart (X11, wayfire,
-# labwc), then waits for http://localhost:<port> and prints the URLs.
+# writes config.json (mode 600) and checks the token can write the data repo,
+# installs + starts lab-hub.service and the lab-hub-update.timer auto-updater
+# (a root-owned copy of scripts/update.sh in /usr/local/lib/lab-hub), sets up
+# kiosk autostart (X11, wayfire, labwc), then waits for http://localhost:<port>
+# and prints the URLs. Re-run it after changes to systemd/ or scripts/update.sh:
+# the auto-updater never installs those by itself.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$APP_DIR"
+
+# Root-owned copy of the updater that lab-hub-update.service runs (as root).
+# The copy in the checkout is NOT run as root: the checkout follows GitHub.
+UPDATER_DIR="/usr/local/lib/lab-hub"
 
 if [ -t 1 ]; then B=$'\033[1m'; Y=$'\033[33m'; R=$'\033[31m'; G=$'\033[32m'; N=$'\033[0m'
 else B=""; Y=""; R=""; G=""; N=""; fi
@@ -37,7 +45,8 @@ ok()   { printf '    %s%s%s\n' "$G" "$*" "$N"; }
 warn() { printf '    %sWARNING:%s %s\n' "$Y" "$N" "$*" >&2; }
 die()  { printf '\n%sERROR:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 
-usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# the comment block at the top of this file, without the "# "
+usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"; }
 
 # --- options ------------------------------------------------------------------
 OPT_REPO=""; OPT_REPO_SET=0
@@ -95,8 +104,18 @@ case "$APP_DIR" in
   *" "*) warn "the folder path contains spaces. It should work, but a path like ~/lab-hub is less fragile." ;;
 esac
 
+ORIGIN=""
 if git -C "$APP_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  if ! git -C "$APP_DIR" remote get-url origin >/dev/null 2>&1; then
+  if ORIGIN="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null)"; then
+    case "$ORIGIN" in
+      http://*@*|https://*@*)
+        # The Pi only pulls the public code repo; it must not hold a credential
+        # that can push code (that would be root on this Pi via the updater).
+        warn "the 'origin' URL contains a login or token. The Pi only needs to pull, anonymously:"
+        warn "  git -C \"$APP_DIR\" remote set-url origin https://github.com/richard-0417/lab-hub.git" ;;
+    esac
+  else
+    ORIGIN=""
     warn "this clone has no 'origin' remote, so automatic code updates can't work."
   fi
   if [ -n "$(git -C "$APP_DIR" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
@@ -147,184 +166,11 @@ ok "Python packages ready"
 # --- 3. config.json -----------------------------------------------------------------
 step "Configuration (config.json)"
 
-# Small Python helper for everything JSON. Inputs come from LH_* env vars (the
-# token never appears on a command line). Modes: show | write | olddb | check.
+# JSON + GitHub helper (scripts/install_helper.py). Inputs go in LH_* env
+# vars, so the token never appears on a command line.
 cfg_py() {
-  LH_APP_DIR="$APP_DIR" LH_OLD_DIR="$OLD_DIR" python3 - "$1" <<'PY'
-import json, os, sys, tempfile
-
-mode = sys.argv[1]
-app_dir = os.environ["LH_APP_DIR"]
-old_dir = os.environ.get("LH_OLD_DIR") or ""
-cfg_path = os.path.join(app_dir, "config.json")
-DEFAULT_REPO = "richard-0417/lab-hub"
-# keys of the old pFLARES-tracker dashboard that no longer mean anything
-OBSOLETE = ("data_dir", "csv_glob", "monitor_points", "stale_seconds",
-            "tracker_cmd", "tracker_display", "tracker_log")
-
-
-def load(path, required=False):
-    if not path or not os.path.exists(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as exc:
-        if required:
-            sys.stderr.write("%s is not valid JSON (%s). Fix or delete it, then re-run.\n" % (path, exc))
-            sys.exit(2)
-        sys.stderr.write("note: ignoring unreadable %s (%s)\n" % (path, exc))
-        return {}
-    if not isinstance(data, dict):
-        if required:
-            sys.stderr.write("%s must contain a JSON object. Fix or delete it, then re-run.\n" % path)
-            sys.exit(2)
-        return {}
-    return data
-
-
-def one_line(v):
-    return " ".join(str(v).split()) if v is not None else ""
-
-
-cur = load(cfg_path, required=True)
-old = load(os.path.join(old_dir, "config.json")) if old_dir else {}
-
-
-def old_path(value):
-    """Resolve a path from the old config relative to the old install."""
-    if not value or not isinstance(value, str):
-        return ""
-    if value.startswith(("http://", "https://")) or os.path.isabs(value):
-        return value
-    return os.path.normpath(os.path.join(old_dir, value))
-
-
-def s(d, k):
-    v = d.get(k)
-    return v.strip() if isinstance(v, str) else ""
-
-
-if mode == "show":
-    name = s(cur, "name") or s(cur, "subgroup_name") or s(old, "name") or s(old, "subgroup_name") or "Lab Hub"
-    repo = cur["github_repo"] if isinstance(cur.get("github_repo"), str) else DEFAULT_REPO
-    ics = s(cur, "calendar_ics") or old_path(s(old, "calendar_ics"))
-    print(one_line(name))
-    print(one_line(repo))
-    print(one_line(ics))
-    print("1" if s(cur, "github_token") else "0")
-
-elif mode == "write":
-    cfg = dict(cur)
-    for k in OBSOLETE:
-        cfg.pop(k, None)
-    cfg.pop("subgroup_name", None)          # replaced by "name"
-    out = {"name": os.environ["LH_NAME"], "github_repo": os.environ["LH_REPO"]}
-    action = os.environ.get("LH_TOKEN_ACTION", "keep")
-    if action == "set":
-        out["github_token"] = os.environ.get("LH_TOKEN", "")
-    elif action == "clear":
-        out["github_token"] = ""
-    out["calendar_ics"] = os.environ["LH_ICS"]
-    if "calendar_max_events" not in cfg and isinstance(old.get("calendar_max_events"), int):
-        out["calendar_max_events"] = old["calendar_max_events"]
-    # new keys first on a fresh file; existing files keep their key order
-    merged = dict(out) if not cur else cfg
-    merged.update(out)
-    data = json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
-    fd, tmp = tempfile.mkstemp(prefix="config.json.tmp-", dir=app_dir)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-        os.replace(tmp, cfg_path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
-    os.chmod(cfg_path, 0o600)
-
-elif mode == "olddb":
-    # copy the old SQLite file next to this install so the app imports it
-    src = old_path(s(old, "db_path")) or os.path.join(old_dir, "labhub.db")
-    dst = s(cur, "db_path") or "labhub.db"
-    if not os.path.isabs(dst):
-        dst = os.path.join(app_dir, dst)
-    if not os.path.exists(src):
-        print("no old database found at %s; nothing to import" % src)
-        sys.exit(0)
-    if os.path.exists(dst):
-        print("%s already exists here; not overwriting it (delete it first to re-import)" % dst)
-        sys.exit(0)
-    import shutil
-    import sqlite3
-    tmp = dst + "-copying"
-    try:
-        con = sqlite3.connect(src)
-        try:
-            counts = []
-            for table in ("tasks", "requests", "notes"):
-                try:
-                    n = con.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0]
-                except sqlite3.Error:
-                    n = 0
-                counts.append("%d %s" % (n, table))
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            dest = sqlite3.connect(tmp)
-            try:
-                con.backup(dest)       # consistent copy, includes the WAL
-            finally:
-                dest.close()
-        finally:
-            con.close()
-        os.replace(tmp, dst)
-        print("copied %s (%s)" % (src, ", ".join(counts)))
-    except Exception as exc:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        shutil.copy2(src, dst)
-        if os.path.exists(src + "-wal"):
-            shutil.copy2(src + "-wal", dst + "-wal")
-        print("copied %s as a plain file (sqlite said: %s)" % (src, exc))
-    print("its tasks, requests and notes are imported the first time Lab Hub starts")
-
-elif mode == "port":
-    try:
-        print(int(cur.get("port") or 8000))
-    except Exception:
-        print(8000)
-
-elif mode == "check":
-    # Can the configured token see the configured repo? (never prints the token)
-    import urllib.error
-    import urllib.request
-    repo = s(cur, "github_repo")
-    token = os.environ.get("LABHUB_GITHUB_TOKEN") or s(cur, "github_token")
-    api = (s(cur, "github_api") or "https://api.github.com").rstrip("/")
-    if not repo or not token:
-        sys.exit(0)
-    req = urllib.request.Request(api + "/repos/" + repo, headers={
-        "Authorization": "Bearer " + token,
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "lab-hub-install",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            info = json.loads(r.read().decode("utf-8"))
-        vis = "private" if info.get("private") else "public"
-        print("OK: the token can see %s (%s repo)" % (repo, vis))
-    except urllib.error.HTTPError as e:
-        if e.code == 401:
-            print("PROBLEM: GitHub rejected the token (typo, expired or revoked?)")
-        elif e.code == 404:
-            print("PROBLEM: %s not found, or the token wasn't given access to it" % repo)
-        else:
-            print("PROBLEM: GitHub answered HTTP %d for %s" % (e.code, repo))
-    except Exception as e:
-        print("could not reach GitHub to check the token (%s); skipping" % e.__class__.__name__)
-PY
+  LH_APP_DIR="$APP_DIR" LH_OLD_DIR="$OLD_DIR" LH_ORIGIN="$ORIGIN" \
+    python3 "$APP_DIR/scripts/install_helper.py" "$1"
 }
 
 SHOW="$(cfg_py show)" || die "could not read config.json (see the message above)."
@@ -349,13 +195,17 @@ NAME="$(printf '%s' "$NAME" | tr -d '\r\n')"
 
 if [ "$OPT_REPO_SET" = 1 ]; then REPO="$OPT_REPO"
 else
-  [ "$INTERACTIVE" = 1 ] && info "GitHub repo that holds board.json ('none' = keep the board on this Pi only)"
-  ask REPO "GitHub repo (owner/name)" "$CUR_REPO"
+  if [ "$INTERACTIVE" = 1 ]; then
+    info "GitHub DATA repo that holds board.json, e.g. richard-0417/lab-hub-data. Not the"
+    info "code repo lab-hub: tokens get access to the data repo only. ('none' = keep the"
+    info "board on this Pi only)"
+  fi
+  ask REPO "GitHub data repo (owner/name)" "$CUR_REPO"
 fi
 case "$REPO" in none|NONE|-|"") REPO="" ;; esac
 REPO="${REPO#https://github.com/}"; REPO="${REPO%.git}"; REPO="${REPO%/}"
 if [ -n "$REPO" ] && ! printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'; then
-  die "'$REPO' doesn't look like owner/name (e.g. richard-0417/lab-hub)."
+  die "'$REPO' doesn't look like owner/name (e.g. richard-0417/lab-hub-data)."
 fi
 
 if [ "$OPT_ICS_SET" = 1 ]; then ICS="$OPT_ICS"
@@ -372,8 +222,9 @@ if [ -n "$TOKEN_FILE" ]; then
   [ -n "$NEW_TOKEN" ] || die "--token-file $TOKEN_FILE is empty."
   TOKEN_ACTION="set"
 elif [ "$INTERACTIVE" = 1 ] && [ -n "$REPO" ]; then
-  info "A fine-grained GitHub token with Contents: Read and write on $REPO lets this Pi sync."
-  info "Create one at https://github.com/settings/personal-access-tokens/new (see README)."
+  info "A fine-grained GitHub token with Contents: Read and write on $REPO (and on no"
+  info "other repo) lets this Pi sync. Create one at"
+  info "https://github.com/settings/personal-access-tokens/new (see README, step 4)."
   if [ "$HAS_TOKEN" = 1 ]; then
     prompt="    GitHub token (hidden; Enter = keep the saved one, '-' = remove): "
   else
@@ -407,8 +258,16 @@ else
   fi
   case "$token_state" in
     set|saved) info "token: $token_state"
-               check="$(cfg_py check || true)"
-               [ -z "$check" ] || info "$check" ;;
+               # Tests read AND write access (a read-only token, or one without
+               # this repo, can still read a public repo) and warns if the token
+               # could also change the code repo.
+               cfg_py check 2>&1 | while IFS= read -r line; do
+                 case "$line" in
+                   OK:*)               ok "$line" ;;
+                   PROBLEM:*|WARNING:*) warn "${line#*: }" ;;
+                   *)                  info "$line" ;;
+                 esac
+               done || true ;;
     *) info "token: none -> sync stays off until you add one (re-run this script)" ;;
   esac
 fi
@@ -454,6 +313,12 @@ if [ "$NO_SERVICE" = 0 ] && ! command -v systemctl >/dev/null 2>&1; then
 fi
 if [ "$NO_SERVICE" = 0 ]; then
   step "Installing systemd services (asks for your password if sudo needs it)"
+  # The updater runs as root, so it runs from a root-owned copy. The checkout's
+  # own scripts/update.sh (and systemd/) follow GitHub automatically, and only
+  # this script, run by you, installs them.
+  sudo install -d -m 755 "$UPDATER_DIR"
+  sudo install -m 755 -o root -g root "$APP_DIR/scripts/update.sh" "$UPDATER_DIR/update.sh"
+  info "$UPDATER_DIR/update.sh (root-owned copy of scripts/update.sh)"
   for unit in lab-hub.service lab-hub-update.service lab-hub-update.timer; do
     render "systemd/$unit" "$TMP_DIR/$unit"
     sudo install -m 644 "$TMP_DIR/$unit" "/etc/systemd/system/$unit"
@@ -575,7 +440,11 @@ if [ "$NO_KIOSK" = 0 ]; then
 fi
 
 # --- 7. wait for the server and print the URLs -------------------------------------------
-PORT="$(cfg_py port 2>/dev/null || echo 8000)"
+# Same answer as run.sh / the service: the app's own config loader (config.json,
+# LABHUB_CONFIG, LABHUB_PORT in this shell). /etc/default/lab-hub is only read
+# by the service, which is why the README says to keep host/port in config.json.
+PORT="$("$VENV_PY" -m app.config port 2>/dev/null || true)"
+case "$PORT" in ''|*[!0-9]*) PORT="$(cfg_py port 2>/dev/null || echo 8000)" ;; esac
 if [ "$SERVICE_OK" = 1 ]; then
   step "Waiting for Lab Hub on http://localhost:$PORT"
   up=0
@@ -588,13 +457,18 @@ if [ "$SERVICE_OK" = 1 ]; then
   done
   if [ "$up" = 1 ]; then
     ok "Lab Hub is up"
-    # one sync now, so token/repo problems show up here rather than later
+    # one sync now, so token/repo problems show up here rather than later.
+    # POST /api/sync waits up to 20 s for a running cycle, then runs one, and
+    # each GitHub request in it may take up to 15 s: allow for a few.
     python3 - "http://localhost:$PORT/api/sync" <<'PY' || true
-import json, sys, urllib.request
+import json, socket, sys, urllib.request
 try:
     req = urllib.request.Request(sys.argv[1], data=b"", method="POST")
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=120) as r:
         s = json.loads(r.read().decode("utf-8"))
+except (socket.timeout, TimeoutError):
+    print("    (the sync is still running; see: curl -s %s)" % sys.argv[1])
+    raise SystemExit
 except Exception as e:
     print("    (could not ask for a sync status: %s)" % e.__class__.__name__)
     raise SystemExit
@@ -602,7 +476,8 @@ state = s.get("state")
 if not s.get("enabled") or state == "off":
     print("    GitHub sync: off (no repo or no token configured)")
 elif state in ("ok", "pending", "syncing"):
-    print("    GitHub sync: %s with %s (branch %s, %s)" % (state, s.get("repo"), s.get("branch"), s.get("path")))
+    note = "" if s.get("last_push") else " - nothing needed pushing yet, so only the token check above tested writing"
+    print("    GitHub sync: %s with %s (branch %s, %s)%s" % (state, s.get("repo"), s.get("branch"), s.get("path"), note))
 else:
     print("    GitHub sync: %s - %s" % (state, s.get("last_error") or "see journalctl -u lab-hub"))
 PY
@@ -624,25 +499,18 @@ else
   info "Start it by hand with: ./run.sh   (then open http://localhost:$PORT)"
 fi
 
-# Pages site: the code repo (origin) — the data repo may be a different, private one.
-PAGES=""
-origin="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || true)"
-case "$origin" in
-  *github.com[:/]*)
-    slug="${origin#*github.com}"; slug="${slug#[:/]}"; slug="${slug%.git}"; slug="${slug%/}"
-    owner="${slug%%/*}"; rname="${slug#*/}"
-    if [ -n "$owner" ] && [ -n "$rname" ] && [ "$owner" != "$slug" ]; then
-      PAGES="https://$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]').github.io/$rname/"
-    fi ;;
-esac
-if [ -z "$PAGES" ] && [ -n "$REPO" ]; then
-  PAGES="https://$(printf '%s' "${REPO%%/*}" | tr '[:upper:]' '[:lower:]').github.io/${REPO#*/}/"
+# Pages site: published from the code repo (origin); the board lives in the
+# data repo. "write" above stored this address as pages_url (with ?repo=<data
+# repo>) so the kiosk footer shows the same one.
+if [ -n "$REPO" ]; then
+  PAGES="$(cfg_py pages 2>/dev/null || true)"
+  [ -z "$PAGES" ] || info "From anywhere:      $PAGES   (paste a token there once)"
 fi
-[ -z "$PAGES" ] || info "From anywhere:      $PAGES   (paste a token there once)"
 
 if [ "$NO_KIOSK" = 0 ]; then
   echo
   info "The kiosk starts at the next desktop login. To start it now: sudo reboot"
-  info "(or from a terminal on the Pi's desktop: $KIOSK_CMD &)"
+  # setsid -f: the kiosk keeps running after that terminal window is closed
+  info "(or from a terminal on the Pi's desktop: setsid -f $KIOSK_CMD >/dev/null 2>&1)"
 fi
 info "Logs: journalctl -u lab-hub -f     Updates: journalctl -u lab-hub-update"

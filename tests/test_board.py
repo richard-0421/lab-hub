@@ -14,6 +14,8 @@ from app import board as B  # noqa: E402
 with open(os.path.join(ROOT, "tests", "ops_vectors.json"), encoding="utf-8") as _f:
     VECTORS = json.load(_f)
 
+TS = "2026-10-16T14:00:00Z"
+
 
 def strict(obj):
     """JSON text that keeps key order and distinguishes true from 1."""
@@ -157,6 +159,17 @@ class NormalizeExtraTests(unittest.TestCase):
         out = B.normalize_board(doc)
         self.assertEqual(len(out["notes"]), B.MAX_ITEMS)
         self.assertEqual(out["notes"][0]["id"], "n2099")  # lowest rank kept
+
+    def test_add_into_full_collection_is_a_noop(self):
+        full = B.normalize_board({"tasks": [{"id": "t%04d" % i, "title": "x", "rank": i} for i in range(B.MAX_ITEMS)]})
+        add = {"op": "add", "coll": "tasks", "item": {"id": "t-new", "title": "new", "rank": -1}, "ts": TS}
+        # no push of a 2001-item file whose normalization would drop t1999
+        self.assertEqual(B.apply_op(full, add), full)
+        deleted = B.apply_op(full, {"op": "delete", "coll": "tasks", "id": "t0005", "ts": TS})
+        after = B.apply_ops(deleted, [add])
+        self.assertEqual(len(after["tasks"]), B.MAX_ITEMS)
+        self.assertEqual(after["tasks"][0]["id"], "t-new")
+        self.assertEqual(B.normalize_board(after), after)
 
     def test_strict_json(self):
         with self.assertRaises(ValueError):
