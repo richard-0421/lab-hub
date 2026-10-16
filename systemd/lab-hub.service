@@ -1,0 +1,21 @@
+[Unit]
+Description=Lab Hub dashboard (web backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# EDIT these two paths + the user to match your Pi. Avoid spaces in the path
+# (e.g. copy the lab-hub folder to /home/pi/lab-hub).
+User=pi
+WorkingDirectory=/home/pi/lab-hub
+ExecStart=/home/pi/lab-hub/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+# So "Launch tracker" can open the tracker window on the Pi's desktop from the
+# service. XAUTHORITY path may differ (check with: echo $XAUTHORITY on the desktop).
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+
+[Install]
+WantedBy=multi-user.target

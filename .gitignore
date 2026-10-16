@@ -1,0 +1,12 @@
+# local runtime state — never commit
+.venv/
+__pycache__/
+*.pyc
+config.json
+state/
+*.db
+*.db-*
+*.db.migrated*
+*.log
+.DS_Store
+node_modules/

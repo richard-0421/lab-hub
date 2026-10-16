@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Lab Hub Kiosk
+# Autostarts the fullscreen browser when the Pi desktop session logs in.
+# Copy to ~/.config/autostart/ and edit the path to match where lab-hub lives.
+Exec=/home/pi/lab-hub/kiosk.sh
+X-GNOME-Autostart-enabled=true

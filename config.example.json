@@ -1,0 +1,15 @@
+{
+  "subgroup_name": "pFLARES subgroup",
+  "host": "0.0.0.0",
+  "port": 8000,
+
+  "data_dir": "../pFLARE data collector",
+  "csv_glob": "water_level_*.csv",
+  "monitor_points": 60,
+  "stale_seconds": 12,
+
+  "calendar_ics": "",
+  "calendar_max_events": 6,
+
+  "tracker_cmd": ""
+}

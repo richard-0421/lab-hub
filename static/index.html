@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lab Hub</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="clock-wrap">
+      <span id="clock" class="clock">--:--</span>
+      <span id="date" class="date"></span>
+    </div>
+    <div id="subgroup" class="subgroup">Lab hub</div>
+    <div class="health">
+      <span id="h-camera" class="badge">camera</span>
+      <span id="h-meter" class="badge">meter</span>
+      <span id="h-logging" class="badge">logging</span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- Calendar -->
+    <section class="card" id="card-calendar">
+      <h2 class="card-title">Calendar</h2>
+      <div id="calendar" class="cal-list">
+        <p class="empty">Loading…</p>
+      </div>
+    </section>
+
+    <!-- pFLARES live monitor -->
+    <section class="card hero" id="card-monitor">
+      <div class="card-head">
+        <h2 class="card-title">pFLARES live monitor</h2>
+        <span id="rec-badge" class="rec idle">idle</span>
+      </div>
+
+      <div class="level-row">
+        <span id="level" class="level">--</span>
+        <span class="level-unit">mm water level</span>
+      </div>
+      <canvas id="spark" class="spark" width="600" height="90"></canvas>
+
+      <div class="temps" id="temps">
+        <div class="temp"><span class="t-label">T1</span><span class="t-val" id="T1">--</span></div>
+        <div class="temp"><span class="t-label">T2</span><span class="t-val" id="T2">--</span></div>
+        <div class="temp"><span class="t-label">T3</span><span class="t-val" id="T3">--</span></div>
+        <div class="temp"><span class="t-label">T4</span><span class="t-val" id="T4">--</span></div>
+      </div>
+
+      <div id="monitor-file" class="monitor-file">No CSV detected</div>
+
+      <div class="btn-row">
+        <button id="btn-launch" class="btn">Launch tracker</button>
+        <button id="btn-stop" class="btn">Stop</button>
+      </div>
+      <div id="tracker-msg" class="tracker-msg"></div>
+    </section>
+
+    <!-- Tasks -->
+    <section class="card" id="card-tasks">
+      <h2 class="card-title">Tasks</h2>
+      <div id="tasks" class="task-list"></div>
+      <form id="task-form" class="add-form">
+        <input id="task-input" type="text" placeholder="Add a task" autocomplete="off" />
+        <button class="btn icon" type="submit" aria-label="Add task">+</button>
+      </form>
+    </section>
+
+    <!-- Requests -->
+    <section class="card" id="card-requests">
+      <h2 class="card-title">Item requests</h2>
+      <div id="requests" class="req-list"></div>
+      <form id="req-form" class="add-form col">
+        <input id="req-item" type="text" placeholder="Item / thing to order" autocomplete="off" />
+        <div class="add-form">
+          <input id="req-by" type="text" placeholder="Your name" autocomplete="off" />
+          <button class="btn icon" type="submit" aria-label="Add request">+</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Notes -->
+    <section class="card" id="card-notes">
+      <h2 class="card-title">Notes board</h2>
+      <div id="notes" class="note-list"></div>
+      <form id="note-form" class="add-form col">
+        <textarea id="note-body" rows="2" placeholder="Leave a note for the team"></textarea>
+        <div class="add-form">
+          <input id="note-author" type="text" placeholder="Your name" autocomplete="off" />
+          <button class="btn icon" type="submit" aria-label="Add note">+</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span id="s-sample">last sample —</span>
+    <span id="s-url"></span>
+    <span id="s-updated">—</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
