@@ -1,0 +1,15 @@
+# Installed as /etc/systemd/system/lab-hub-update.timer by scripts/install-pi.sh.
+# Check it with:  systemctl list-timers lab-hub-update.timer
+[Unit]
+Description=Check GitHub for Lab Hub code updates every 5 minutes
+
+[Timer]
+OnBootSec=2min
+# also 2 min after the timer is (re)started, e.g. right after install-pi.sh
+OnActiveSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=lab-hub-update.service
+
+[Install]
+WantedBy=timers.target

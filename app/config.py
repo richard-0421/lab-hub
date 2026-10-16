@@ -1,81 +1,216 @@
-"""Configuration loading for the Lab Hub dashboard.
+"""Configuration for the Lab Hub backend.
 
 Order of precedence (low -> high):
   1. DEFAULTS below
-  2. config.json next to the lab-hub folder (optional; copy config.example.json)
-  3. Environment variables named LABHUB_<KEY> (e.g. LABHUB_PORT, LABHUB_CALENDAR_ICS)
+  2. config.json in the project folder (optional; copy config.example.json).
+     Another file can be named with the env var LABHUB_CONFIG.
+  3. Environment variables LABHUB_<KEY> (e.g. LABHUB_PORT, LABHUB_GITHUB_TOKEN)
+
+See docs/ARCHITECTURE.md section 6. The GitHub token is only ever read here
+and handed to the sync client; it is never logged or sent to browsers.
+
+Command line helper (prints values, never the token):
+    python -m app.config host port
 """
 import json
+import logging
 import os
+import re
 
-# lab-hub/ (parent of the app package)
+log = logging.getLogger("labhub.config")
+
+# Project folder (parent of the app package). Relative paths resolve here.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULTS = {
-    "subgroup_name": "pFLARES subgroup",
+    "name": "Lab Hub",
     "host": "0.0.0.0",
     "port": 8000,
-
-    # Where the pFLARES tracker writes its CSVs. Relative paths resolve against BASE_DIR.
-    "data_dir": os.path.join("..", "pFLARE data collector"),
-    "csv_glob": "water_level_*.csv",
-    "monitor_points": 60,          # points kept for the live sparkline
-    "stale_seconds": 12,           # CSV newer than this => treated as "recording"
-
-    # Published Outlook / M365 calendar as an .ics URL, or a local .ics path. Empty => off.
+    "theme": "dark",
     "calendar_ics": "",
-    "calendar_max_events": 6,
-
-    # Optional override for how to launch the tracker. Empty => auto (run.sh, else GUI).
-    "tracker_cmd": "",
-    # X display the tracker window should open on (Pi kiosk is almost always :0).
-    "tracker_display": ":0",
-    # Where the tracker's launch output is captured so failures aren't silent.
-    "tracker_log": os.path.join(BASE_DIR, "tracker_launch.log"),
-
-    "db_path": os.path.join(BASE_DIR, "labhub.db"),
+    "calendar_max_events": 8,
+    "github_repo": "",
+    "github_branch": "data",
+    "github_path": "board.json",
+    "github_token": "",
+    "github_api": "https://api.github.com",
+    "sync_interval": 15,
+    "client_name": "lab-pi",
+    "pages_url": "",
+    "state_dir": "state",
+    "db_path": "labhub.db",
 }
 
+# legacy key -> current key
+ALIASES = {"subgroup_name": "name"}
 
-def _resolve_path(p):
+# key -> (min, max)
+INT_KEYS = {
+    "port": (1, 65535),
+    "sync_interval": (2, 86400),
+    "calendar_max_events": (0, 100),
+}
+
+THEMES = ("dark", "light", "auto")
+_REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
+_SECRET_KEYS = ("github_token",)
+
+
+def _resolve_path(p, base_dir):
     if not p:
         return p
-    return p if os.path.isabs(p) else os.path.abspath(os.path.join(BASE_DIR, p))
+    p = os.path.expanduser(p)
+    return p if os.path.isabs(p) else os.path.abspath(os.path.join(base_dir, p))
 
 
-def load_config():
+def _normalize_repo(value):
+    """Accept 'owner/name', 'https://github.com/owner/name(.git)', 'git@github.com:owner/name.git'."""
+    s = (value or "").strip()
+    if not s:
+        return ""
+    for prefix in ("https://github.com/", "http://github.com/", "git@github.com:", "github.com/"):
+        if s.lower().startswith(prefix):
+            s = s[len(prefix):]
+            break
+    s = s.strip("/")
+    if s.endswith(".git"):
+        s = s[:-4]
+    if not _REPO_RE.fullmatch(s):
+        log.warning("github_repo %r is not 'owner/name'; GitHub sync is off", value)
+        return ""
+    return s
+
+
+def _derive_pages_url(repo):
+    owner, name = repo.split("/", 1)
+    host = "%s.github.io" % owner.lower()
+    if name.lower() == host:
+        return "https://%s/" % host
+    return "https://%s/%s/" % (host, name)
+
+
+def _read_config_file(path):
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not parse %s (%s); using defaults", path, exc)
+        return {}
+    if not isinstance(data, dict):
+        log.warning("%s must contain a JSON object; using defaults", path)
+        return {}
+    return data
+
+
+def load_config(base_dir=None, config_path=None, environ=None):
+    """Build the config dict. All arguments exist for tests:
+
+    base_dir     folder relative paths resolve against (default: project dir)
+    config_path  config file (default: $LABHUB_CONFIG or <base_dir>/config.json)
+    environ      mapping used instead of os.environ
+    """
+    base_dir = base_dir or BASE_DIR
+    environ = os.environ if environ is None else environ
+    if config_path is None:
+        config_path = environ.get("LABHUB_CONFIG") or os.path.join(base_dir, "config.json")
+
     cfg = dict(DEFAULTS)
 
-    path = os.path.join(BASE_DIR, "config.json")
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                user = json.load(f)
-            cfg.update({k: v for k, v in user.items() if v is not None})
-        except Exception as exc:  # noqa: BLE001
-            print(f"[config] could not parse config.json: {exc}")
+    user = _read_config_file(config_path)
+    for old, new in ALIASES.items():
+        if old in user and new not in user:
+            user[new] = user[old]
+    for key in DEFAULTS:
+        if key in user and user[key] is not None:
+            cfg[key] = user[key]
 
-    for key in list(cfg.keys()):
-        env = os.environ.get("LABHUB_" + key.upper())
+    for old, new in ALIASES.items():
+        env_old = environ.get("LABHUB_" + old.upper())
+        if env_old is not None and environ.get("LABHUB_" + new.upper()) is None:
+            cfg[new] = env_old
+    for key in DEFAULTS:
+        env = environ.get("LABHUB_" + key.upper())
         if env is not None:
-            if isinstance(DEFAULTS.get(key), int):
-                try:
-                    env = int(env)
-                except ValueError:
-                    pass
             cfg[key] = env
 
-    # normalise paths
-    cfg["data_dir"] = _resolve_path(cfg["data_dir"])
-    cfg["db_path"] = _resolve_path(cfg["db_path"])
-    cfg["tracker_log"] = _resolve_path(cfg["tracker_log"])
-    if cfg.get("calendar_ics") and not (
-        cfg["calendar_ics"].startswith("http://") or cfg["calendar_ics"].startswith("https://")
-    ):
-        # treat a non-URL calendar source as a (possibly relative) local file
-        cfg["calendar_ics"] = _resolve_path(cfg["calendar_ics"])
+    # ---- coercion ----------------------------------------------------------
+    for key, (lo, hi) in INT_KEYS.items():
+        try:
+            val = int(str(cfg[key]).strip())
+        except (TypeError, ValueError):
+            log.warning("config %s=%r is not an integer; using %s", key, cfg[key], DEFAULTS[key])
+            val = DEFAULTS[key]
+        cfg[key] = min(hi, max(lo, val))
 
+    for key, default in DEFAULTS.items():
+        if key in INT_KEYS:
+            continue
+        val = cfg[key]
+        if not isinstance(val, str):
+            val = "" if isinstance(val, (dict, list, bool)) else str(val)
+        cfg[key] = val.strip()
+
+    # tokens are pasted from web pages; drop every whitespace character
+    cfg["github_token"] = "".join(cfg["github_token"].split())
+    cfg["name"] = " ".join(cfg["name"].split()) or DEFAULTS["name"]
+    cfg["client_name"] = " ".join(cfg["client_name"].split())[:60] or DEFAULTS["client_name"]
+    cfg["host"] = cfg["host"] or DEFAULTS["host"]
+    cfg["theme"] = cfg["theme"].lower() if cfg["theme"].lower() in THEMES else DEFAULTS["theme"]
+    cfg["github_repo"] = _normalize_repo(cfg["github_repo"])
+    cfg["github_branch"] = cfg["github_branch"] or DEFAULTS["github_branch"]
+    cfg["github_path"] = cfg["github_path"].strip("/") or DEFAULTS["github_path"]
+    cfg["github_api"] = (cfg["github_api"] or DEFAULTS["github_api"]).rstrip("/")
+    if not cfg["pages_url"] and cfg["github_repo"]:
+        cfg["pages_url"] = _derive_pages_url(cfg["github_repo"])
+
+    cfg["state_dir"] = _resolve_path(cfg["state_dir"] or DEFAULTS["state_dir"], base_dir)
+    cfg["db_path"] = _resolve_path(cfg["db_path"], base_dir)
+    ics = cfg["calendar_ics"]
+    if ics and not (ics.startswith("http://") or ics.startswith("https://")):
+        # a non-URL calendar source is a (possibly relative) local .ics file
+        cfg["calendar_ics"] = _resolve_path(ics, base_dir)
     return cfg
 
 
-CONFIG = load_config()
+def github_enabled(cfg):
+    """GitHub sync runs only when both a repo and a token are configured."""
+    return bool(cfg.get("github_repo")) and bool(cfg.get("github_token"))
+
+
+def redacted(cfg):
+    """Copy of ``cfg`` that is safe to print or log."""
+    out = dict(cfg)
+    for key in _SECRET_KEYS:
+        if out.get(key):
+            out[key] = "<set>"
+    return out
+
+
+_CACHED = None
+
+
+def get_config():
+    """Process-wide config (loaded on first use)."""
+    global _CACHED
+    if _CACHED is None:
+        _CACHED = load_config()
+    return _CACHED
+
+
+def __getattr__(name):  # PEP 562: keeps the old ``from .config import CONFIG``
+    if name == "CONFIG":
+        return get_config()
+    raise AttributeError(name)
+
+
+if __name__ == "__main__":
+    import sys
+
+    conf = redacted(load_config())
+    keys = sys.argv[1:]
+    if not keys:
+        print(json.dumps(conf, indent=2))
+    for k in keys:
+        print(conf.get(k, ""))

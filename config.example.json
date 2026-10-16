@@ -1,15 +1,19 @@
 {
-  "subgroup_name": "pFLARES subgroup",
+  "_comment": "Copy to config.json (scripts/install-pi.sh does this for you). Every key is optional; LABHUB_<KEY> env vars override. Prefer the LABHUB_GITHUB_TOKEN env var (or install-pi.sh, which chmods config.json to 600) over typing the token here. See README.md > Configuration.",
+  "name": "Lab Hub",
   "host": "0.0.0.0",
   "port": 8000,
-
-  "data_dir": "../pFLARE data collector",
-  "csv_glob": "water_level_*.csv",
-  "monitor_points": 60,
-  "stale_seconds": 12,
-
+  "theme": "dark",
   "calendar_ics": "",
-  "calendar_max_events": 6,
-
-  "tracker_cmd": ""
+  "calendar_max_events": 8,
+  "github_repo": "richard-0417/lab-hub",
+  "github_branch": "data",
+  "github_path": "board.json",
+  "github_token": "",
+  "github_api": "https://api.github.com",
+  "sync_interval": 15,
+  "client_name": "lab-pi",
+  "pages_url": "",
+  "state_dir": "state",
+  "db_path": "labhub.db"
 }

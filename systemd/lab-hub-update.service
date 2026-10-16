@@ -1,0 +1,19 @@
+# TEMPLATE — scripts/install-pi.sh fills in the user + folder placeholders and
+# installs the result as /etc/systemd/system/lab-hub-update.service.
+#
+# Started every 5 minutes by lab-hub-update.timer. Runs as root only so it can
+# restart lab-hub.service; all git/pip work is done as LABHUB_USER.
+# Run it by hand with:   sudo systemctl start lab-hub-update
+# See what it did with:  journalctl -u lab-hub-update
+[Unit]
+Description=Lab Hub auto-update (fast-forward to GitHub main)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=LABHUB_USER=__USER__
+ExecStart=/bin/bash "__APP_DIR__/scripts/update.sh"
+# pip on a Pi can be slow when requirements.txt changes.
+TimeoutStartSec=15min
+Nice=10

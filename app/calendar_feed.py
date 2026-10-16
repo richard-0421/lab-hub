@@ -2,16 +2,27 @@
 
 In Outlook: Calendar -> Sharing & permissions -> publish the calendar and copy
 the ICS link. Put that URL in config.json as "calendar_ics". A local .ics file
-path also works (handy for testing / offline). This is read-only; upgrading to
-the Microsoft Graph API (for auth'd or write access) can slot in behind the same
-get_events() interface later.
+path also works (handy for testing / offline). Read-only.
+
+Times are returned as naive *local* ISO strings (what the kiosk shows).
+Recurring events (RRULE) are not expanded - only their first occurrence is
+seen.
 """
+import logging
 import os
 import ssl
+import threading
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from .config import CONFIG
+log = logging.getLogger("labhub.calendar")
+
+CACHE_SECONDS = 60          # don't refetch the feed more often than this
+STALE_OK_SECONDS = 24 * 3600  # serve the last good copy this long when offline
+
+_cache_lock = threading.Lock()
+_cache = {"source": None, "at": 0.0, "text": None}
 
 
 def _fetch(source):
@@ -24,15 +35,35 @@ def _fetch(source):
             with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
                 return resp.read().decode("utf-8", "replace")
         except Exception as exc:  # noqa: BLE001
-            print(f"[calendar] fetch failed: {exc}")
+            log.warning("calendar fetch failed: %s", exc)
             return None
     if os.path.exists(source):
         try:
             with open(source, encoding="utf-8", errors="replace") as f:
                 return f.read()
         except Exception as exc:  # noqa: BLE001
-            print(f"[calendar] read failed: {exc}")
+            log.warning("calendar read failed: %s", exc)
     return None
+
+
+def _fetch_cached(source):
+    now = time.time()
+    with _cache_lock:
+        if _cache["source"] == source and _cache["text"] is not None and now - _cache["at"] < CACHE_SECONDS:
+            return _cache["text"]
+    text = _fetch(source)
+    with _cache_lock:
+        if text is not None:
+            _cache.update(source=source, at=now, text=text)
+            return text
+        if _cache["source"] == source and _cache["text"] is not None and now - _cache["at"] < STALE_OK_SECONDS:
+            return _cache["text"]
+    return None
+
+
+def clear_cache():
+    with _cache_lock:
+        _cache.update(source=None, at=0.0, text=None)
 
 
 def _unfold(text):
@@ -47,7 +78,16 @@ def _unfold(text):
     return out
 
 
+def _unescape(value):
+    return (
+        value.replace("\\n", " ").replace("\\N", " ")
+        .replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+        .strip()
+    )
+
+
 def _parse_dt(value, params):
+    """-> (naive local datetime or None, is_all_day)"""
     v = value.strip()
     is_date = "VALUE=DATE" in params.upper() or (len(v) == 8 and "T" not in v)
     try:
@@ -63,12 +103,9 @@ def _parse_dt(value, params):
     return None, is_date
 
 
-def get_events():
-    source = CONFIG.get("calendar_ics")
-    text = _fetch(source)
-    if not text:
-        return {"configured": bool(source), "events": []}
-
+def parse_events(text):
+    """All VEVENTs in ``text`` as dicts {summary, location, start, end, all_day}
+    (start/end are naive local datetimes; end may be None)."""
     events = []
     cur = None
     for line in _unfold(text):
@@ -83,26 +120,53 @@ def get_events():
             key = name.split(";")[0].upper()
             params = name[len(key):]
             if key == "SUMMARY":
-                cur["summary"] = value.replace("\\,", ",").replace("\\n", " ").strip()
+                cur["summary"] = _unescape(value)
             elif key == "LOCATION":
-                cur["location"] = value.replace("\\,", ",").strip()
+                cur["location"] = _unescape(value)
             elif key == "DTSTART":
                 dt, all_day = _parse_dt(value, params)
                 cur["start"] = dt
                 cur["all_day"] = all_day
+            elif key == "DTEND":
+                dt, _ = _parse_dt(value, params)
+                cur["end"] = dt
+    return events
 
-    now = datetime.now()
+
+def get_events(cfg, now=None):
+    """Body of GET /api/calendar:
+    {"configured", "events": [{"summary", "location", "start", "end", "all_day"}]}"""
+    source = cfg.get("calendar_ics") or ""
+    max_events = cfg.get("calendar_max_events", 8)
+    if not source:
+        return {"configured": False, "events": []}
+    text = _fetch_cached(source)
+    if not text:
+        return {"configured": True, "events": []}
+
+    now = now or datetime.now()
     horizon = now - timedelta(hours=3)
-    upcoming = [e for e in events if e.get("start") and e["start"] >= horizon]
+
+    def keep(e):
+        start = e.get("start")
+        if not start:
+            return False
+        end = e.get("end")
+        # upcoming, recently started, or still going on (e.g. an all-day event today)
+        return start >= horizon or (end is not None and end > now)
+
+    upcoming = [e for e in parse_events(text) if keep(e)]
     upcoming.sort(key=lambda e: e["start"])
 
     out = []
-    for e in upcoming[: CONFIG["calendar_max_events"]]:
+    for e in upcoming[: max(0, int(max_events))]:
+        end = e.get("end")
         out.append(
             {
-                "summary": e.get("summary", "(untitled)"),
+                "summary": e.get("summary") or "(untitled)",
                 "location": e.get("location", ""),
                 "start": e["start"].isoformat(),
+                "end": end.isoformat() if end else None,
                 "all_day": bool(e.get("all_day")),
             }
         )

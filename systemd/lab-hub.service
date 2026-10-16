@@ -1,21 +1,29 @@
+# TEMPLATE — scripts/install-pi.sh fills in the user + folder placeholders and
+# installs the result as /etc/systemd/system/lab-hub.service.
+# Re-run ./scripts/install-pi.sh after editing; don't copy this file by hand.
+#
+# run.sh --service reads host/port from config.json (LABHUB_HOST/LABHUB_PORT
+# override) and execs uvicorn from the project's .venv. It never creates or
+# repairs the .venv itself — that's install-pi.sh's job.
 [Unit]
-Description=Lab Hub dashboard (web backend)
+Description=Lab Hub dashboard (web server + GitHub sync)
 After=network-online.target
 Wants=network-online.target
+# Keep retrying forever (a kiosk should come back on its own).
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# EDIT these two paths + the user to match your Pi. Avoid spaces in the path
-# (e.g. copy the lab-hub folder to /home/pi/lab-hub).
-User=pi
-WorkingDirectory=/home/pi/lab-hub
-ExecStart=/home/pi/lab-hub/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-Restart=on-failure
+User=__USER__
+WorkingDirectory=__APP_DIR__
+Environment=PYTHONUNBUFFERED=1
+# Optional extra settings, e.g. LABHUB_GITHUB_TOKEN=github_pat_...
+# (one KEY=value per line; keep the file root-owned, mode 600).
+EnvironmentFile=-/etc/default/lab-hub
+ExecStart=/bin/bash "__APP_DIR__/run.sh" --service
+Restart=always
 RestartSec=3
-# So "Launch tracker" can open the tracker window on the Pi's desktop from the
-# service. XAUTHORITY path may differ (check with: echo $XAUTHORITY on the desktop).
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/pi/.Xauthority
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target

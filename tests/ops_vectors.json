@@ -1,0 +1,2375 @@
+{
+ "_doc": "Shared test vectors for app/board.py and static/js/board.js. See docs/ARCHITECTURE.md §2-3. normalize: normalize_board(input) == output. apply: apply_ops(board, ops) == expect (board is already normalized). valid_ops/invalid_ops: validate_op accepts/rejects. serialize: serialize_board(normalize_board(json.loads(input_text))) == output_text.",
+ "normalize": [
+  {
+   "name": "empty object",
+   "input": {},
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "non-object document",
+   "input": [
+    1,
+    2
+   ],
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "top-level fields + unknown keys dropped",
+   "input": {
+    "schema": 7,
+    "updated_at": "2026-10-16T10:00:00-04:00",
+    "updated_by": "lab\npi",
+    "junk": true,
+    "tasks": "nope"
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "2026-10-16T14:00:00Z",
+    "updated_by": "lab pi",
+    "tasks": [],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "hand-edited task gets defaults, lenient enum, tag cleanup, bad rank",
+   "input": {
+    "tasks": [
+     {
+      "title": "  Buy  tips ",
+      "priority": " HIGH ",
+      "status": "blocked",
+      "tags": [
+       "#Bio",
+       "bio",
+       "  ##x ",
+       5,
+       "",
+       "#"
+      ],
+      "rank": "abc",
+      "extra": 1
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-auto-0",
+      "title": "Buy  tips",
+      "notes": "",
+      "status": "todo",
+      "priority": "high",
+      "assignee": "",
+      "due": "",
+      "tags": [
+       "bio",
+       "x"
+      ],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "invalid id becomes auto; empty title dropped before dedupe; duplicates keep first",
+   "input": {
+    "tasks": [
+     {
+      "id": "a",
+      "title": "   "
+     },
+     {
+      "id": "a",
+      "title": "one"
+     },
+     {
+      "id": "a",
+      "title": "dup"
+     },
+     {
+      "id": "bad id!",
+      "title": "x"
+     },
+     "garbage",
+     null
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "a",
+      "title": "one",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-auto-3",
+      "title": "x",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "sorted by rank then id",
+   "input": {
+    "tasks": [
+     {
+      "id": "c",
+      "title": "C",
+      "rank": 2
+     },
+     {
+      "id": "b",
+      "title": "B",
+      "rank": 1
+     },
+     {
+      "id": "a",
+      "title": "A",
+      "rank": 2
+     },
+     {
+      "id": "z",
+      "title": "Z",
+      "rank": -0.5
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "z",
+      "title": "Z",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": -0.5,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "b",
+      "title": "B",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "a",
+      "title": "A",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "c",
+      "title": "C",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "rank booleans and non-numbers become 0",
+   "input": {
+    "tasks": [
+     {
+      "id": "a",
+      "title": "A",
+      "rank": true
+     },
+     {
+      "id": "b",
+      "title": "B",
+      "rank": "3"
+     },
+     {
+      "id": "c",
+      "title": "C",
+      "rank": null
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "a",
+      "title": "A",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "b",
+      "title": "B",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "c",
+      "title": "C",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "control characters: single-line vs multi-line fields",
+   "input": {
+    "tasks": [
+     {
+      "id": "a",
+      "title": "a\nb\tc\u0007d",
+      "notes": "l1\r\nl2\rl3\t\u0000end",
+      "assignee": "Ann\r\nLee"
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "a",
+      "title": "a b cd",
+      "notes": "l1\nl2\nl3\tend",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "Ann Lee",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "non-string strings become empty; numbers not stringified",
+   "input": {
+    "tasks": [
+     {
+      "id": "a",
+      "title": "T",
+      "notes": 42,
+      "assignee": [
+       "x"
+      ],
+      "created_by": null
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "a",
+      "title": "T",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "clamping counts code points (emoji = 1)",
+   "input": {
+    "tasks": [
+     {
+      "id": "a",
+      "title": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "assignee": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "a",
+      "title": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "timestamps: offsets, naive=UTC, date-only, fraction, invalid",
+   "input": {
+    "tasks": [
+     {
+      "id": "a",
+      "title": "A",
+      "created_at": "2026-10-16T10:03:22-04:00",
+      "updated_at": "2026-10-16T22:30:00-0300",
+      "done_at": "2026-10-16 09:15"
+     },
+     {
+      "id": "b",
+      "title": "B",
+      "created_at": "2026-10-16",
+      "updated_at": "2024-02-29T12:00:00.5Z",
+      "done_at": "2026-02-30T00:00:00Z"
+     },
+     {
+      "id": "c",
+      "title": "C",
+      "created_at": "nonsense",
+      "updated_at": 1234,
+      "done_at": "2026-10-16T24:00:00Z"
+     },
+     {
+      "id": "d",
+      "title": "D",
+      "created_at": "2026-10-16t10:00:00z",
+      "updated_at": "1969-12-31T23:59:59Z",
+      "done_at": "2026-01-01T00:30:00+01:00"
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "a",
+      "title": "A",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "2026-10-16T14:03:22Z",
+      "updated_at": "2026-10-17T01:30:00Z",
+      "done_at": "2026-10-16T09:15:00Z",
+      "created_by": ""
+     },
+     {
+      "id": "b",
+      "title": "B",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "2026-10-16T00:00:00Z",
+      "updated_at": "2024-02-29T12:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "c",
+      "title": "C",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "d",
+      "title": "D",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "2025-12-31T23:30:00Z",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "due must be a real YYYY-MM-DD",
+   "input": {
+    "tasks": [
+     {
+      "id": "a",
+      "title": "A",
+      "due": "2026-10-31"
+     },
+     {
+      "id": "b",
+      "title": "B",
+      "due": "2026-02-29"
+     },
+     {
+      "id": "c",
+      "title": "C",
+      "due": "2024-02-29"
+     },
+     {
+      "id": "d",
+      "title": "D",
+      "due": "2026-10-16T00:00:00Z"
+     },
+     {
+      "id": "e",
+      "title": "E",
+      "due": "10/16/2026"
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "a",
+      "title": "A",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "2026-10-31",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "b",
+      "title": "B",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "c",
+      "title": "C",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "2024-02-29",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "d",
+      "title": "D",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "e",
+      "title": "E",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "tags capped at 8 and 24 chars",
+   "input": {
+    "tasks": [
+     {
+      "id": "a",
+      "title": "A",
+      "tags": [
+       "t1",
+       "t2",
+       "t3",
+       "t4",
+       "t5",
+       "t6",
+       "t7",
+       "t8",
+       "t9",
+       "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      ]
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "a",
+      "title": "A",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [
+       "t1",
+       "t2",
+       "t3",
+       "t4",
+       "t5",
+       "t6",
+       "t7",
+       "t8"
+      ],
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "requests: link must be http(s), status lenient, legacy 'done' is not a valid status",
+   "input": {
+    "requests": [
+     {
+      "id": "r1",
+      "item": "Nitrile gloves (M)",
+      "qty": "2 boxes",
+      "link": "ftp://x",
+      "status": "Ordered"
+     },
+     {
+      "id": "r2",
+      "item": "Tips",
+      "link": "https://example.com/tips",
+      "status": "done"
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [],
+    "requests": [
+     {
+      "id": "r1",
+      "item": "Nitrile gloves (M)",
+      "qty": "2 boxes",
+      "requested_by": "",
+      "status": "ordered",
+      "notes": "",
+      "link": "",
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z"
+     },
+     {
+      "id": "r2",
+      "item": "Tips",
+      "qty": "",
+      "requested_by": "",
+      "status": "new",
+      "notes": "",
+      "link": "https://example.com/tips",
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z"
+     }
+    ],
+    "notes": []
+   }
+  },
+  {
+   "name": "notes: bool coercion, color, body keeps tabs and newlines, missing id",
+   "input": {
+    "notes": [
+     {
+      "body": "Line 1\n\tindented",
+      "pinned": "true",
+      "color": "PINK"
+     },
+     {
+      "id": "n2",
+      "body": "x",
+      "pinned": 1,
+      "color": "orange"
+     },
+     {
+      "id": "n3",
+      "body": "y",
+      "pinned": "yes"
+     },
+     {
+      "id": "n4",
+      "body": "z",
+      "pinned": 0
+     }
+    ]
+   },
+   "output": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [],
+    "requests": [],
+    "notes": [
+     {
+      "id": "n-auto-0",
+      "body": "Line 1\n\tindented",
+      "author": "",
+      "pinned": true,
+      "color": "pink",
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z"
+     },
+     {
+      "id": "n2",
+      "body": "x",
+      "author": "",
+      "pinned": true,
+      "color": "yellow",
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z"
+     },
+     {
+      "id": "n3",
+      "body": "y",
+      "author": "",
+      "pinned": false,
+      "color": "yellow",
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z"
+     },
+     {
+      "id": "n4",
+      "body": "z",
+      "author": "",
+      "pinned": false,
+      "color": "yellow",
+      "rank": 0,
+      "created_at": "1970-01-01T00:00:00Z",
+      "updated_at": "1970-01-01T00:00:00Z"
+     }
+    ]
+   }
+  }
+ ],
+ "apply": [
+  {
+   "name": "add fills defaults and uses ts for created/updated",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "add",
+     "coll": "tasks",
+     "ts": "2026-10-16T14:00:00Z",
+     "by": "Richard",
+     "item": {
+      "id": "t-1",
+      "title": "Order pipette tips",
+      "priority": "high",
+      "rank": -1,
+      "tags": [
+       "#Bio"
+      ]
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-1",
+      "title": "Order pipette tips",
+      "notes": "",
+      "status": "todo",
+      "priority": "high",
+      "assignee": "",
+      "due": "",
+      "tags": [
+       "bio"
+      ],
+      "rank": -1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "add keeps explicit created_at",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "add",
+     "coll": "notes",
+     "ts": "2026-10-16T15:30:00Z",
+     "item": {
+      "id": "n-1",
+      "body": "Hi",
+      "created_at": "2026-10-16T14:00:00Z"
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [],
+    "requests": [],
+    "notes": [
+     {
+      "id": "n-1",
+      "body": "Hi",
+      "author": "",
+      "pinned": false,
+      "color": "yellow",
+      "rank": 0,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T15:30:00Z"
+     }
+    ]
+   }
+  },
+  {
+   "name": "add with existing id is a no-op",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "add",
+     "coll": "tasks",
+     "ts": "2026-10-16T15:30:00Z",
+     "item": {
+      "id": "t-a",
+      "title": "Different"
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "add sorts into place",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "add",
+     "coll": "tasks",
+     "ts": "2026-10-16T15:30:00Z",
+     "item": {
+      "id": "t-c",
+      "title": "Gamma",
+      "rank": 1.5
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-c",
+      "title": "Gamma",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1.5,
+      "created_at": "2026-10-16T15:30:00Z",
+      "updated_at": "2026-10-16T15:30:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "update sets fields and updated_at",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "update",
+     "coll": "tasks",
+     "id": "t-b",
+     "ts": "2026-10-16T15:30:00Z",
+     "set": {
+      "status": "done",
+      "done_at": "2026-10-16T15:30:00Z",
+      "assignee": " Mei "
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "done",
+      "priority": "normal",
+      "assignee": "Mei",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T15:30:00Z",
+      "done_at": "2026-10-16T15:30:00Z",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "update of a missing id is a no-op (delete wins)",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "update",
+     "coll": "tasks",
+     "id": "t-zzz",
+     "ts": "2026-10-16T15:30:00Z",
+     "set": {
+      "title": "x"
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "update rank re-sorts",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "update",
+     "coll": "tasks",
+     "id": "t-b",
+     "ts": "2026-10-16T15:30:00Z",
+     "set": {
+      "rank": 0.5
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 0.5,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T15:30:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "update clamps long strings and cleans tags",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "update",
+     "coll": "tasks",
+     "id": "t-a",
+     "ts": "2026-10-16T15:30:00Z",
+     "set": {
+      "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "tags": [
+       "#A",
+       "a",
+       "b"
+      ],
+      "due": ""
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [
+       "a",
+       "b"
+      ],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T15:30:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "update ts with offset is canonicalized",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "update",
+     "coll": "tasks",
+     "id": "t-a",
+     "ts": "2026-10-16T11:30:00-04:00",
+     "set": {
+      "priority": "low"
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "low",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T15:30:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "delete existing and missing",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "delete",
+     "coll": "tasks",
+     "id": "t-a",
+     "ts": "2026-10-16T15:30:00Z"
+    },
+    {
+     "op": "delete",
+     "coll": "tasks",
+     "id": "t-nope",
+     "ts": "2026-10-16T15:30:00Z"
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "sequence: add, update, delete, update-after-delete",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "add",
+     "coll": "requests",
+     "ts": "2026-10-16T14:00:00Z",
+     "item": {
+      "id": "r-1",
+      "item": "Gloves"
+     }
+    },
+    {
+     "op": "add",
+     "coll": "requests",
+     "ts": "2026-10-16T14:00:00Z",
+     "item": {
+      "id": "r-2",
+      "item": "Tips",
+      "rank": 1
+     }
+    },
+    {
+     "op": "update",
+     "coll": "requests",
+     "id": "r-1",
+     "ts": "2026-10-16T15:30:00Z",
+     "set": {
+      "status": "ordered",
+      "link": "javascript:alert(1)"
+     }
+    },
+    {
+     "op": "delete",
+     "coll": "requests",
+     "id": "r-2",
+     "ts": "2026-10-16T15:30:00Z"
+    },
+    {
+     "op": "update",
+     "coll": "requests",
+     "id": "r-2",
+     "ts": "2026-10-16T15:30:00Z",
+     "set": {
+      "status": "received"
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [],
+    "requests": [
+     {
+      "id": "r-1",
+      "item": "Gloves",
+      "qty": "",
+      "requested_by": "",
+      "status": "ordered",
+      "notes": "",
+      "link": "",
+      "rank": 0,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T15:30:00Z"
+     }
+    ],
+    "notes": []
+   }
+  },
+  {
+   "name": "invalid op inside a replay is skipped",
+   "board": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "update",
+     "coll": "tasks",
+     "id": "t-a",
+     "ts": "2026-10-16T15:30:00Z",
+     "set": {
+      "status": "blocked"
+     }
+    },
+    {
+     "op": "update",
+     "coll": "tasks",
+     "id": "t-a",
+     "ts": "2026-10-16T15:30:00Z",
+     "set": {
+      "title": "Alpha 2"
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "",
+    "updated_by": "",
+    "tasks": [
+     {
+      "id": "t-a",
+      "title": "Alpha 2",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 1,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T15:30:00Z",
+      "done_at": "",
+      "created_by": ""
+     },
+     {
+      "id": "t-b",
+      "title": "Beta",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": 2,
+      "created_at": "2026-10-16T14:00:00Z",
+      "updated_at": "2026-10-16T14:00:00Z",
+      "done_at": "",
+      "created_by": ""
+     }
+    ],
+    "requests": [],
+    "notes": []
+   }
+  },
+  {
+   "name": "apply does not touch top-level updated_at/updated_by",
+   "board": {
+    "schema": 1,
+    "updated_at": "2026-10-16T14:00:00Z",
+    "updated_by": "web",
+    "tasks": [],
+    "requests": [],
+    "notes": []
+   },
+   "ops": [
+    {
+     "op": "add",
+     "coll": "notes",
+     "ts": "2026-10-16T15:30:00Z",
+     "by": "pi",
+     "item": {
+      "id": "n-1",
+      "body": "Hello"
+     }
+    }
+   ],
+   "expect": {
+    "schema": 1,
+    "updated_at": "2026-10-16T14:00:00Z",
+    "updated_by": "web",
+    "tasks": [],
+    "requests": [],
+    "notes": [
+     {
+      "id": "n-1",
+      "body": "Hello",
+      "author": "",
+      "pinned": false,
+      "color": "yellow",
+      "rank": 0,
+      "created_at": "2026-10-16T15:30:00Z",
+      "updated_at": "2026-10-16T15:30:00Z"
+     }
+    ]
+   }
+  }
+ ],
+ "valid_ops": [
+  {
+   "name": "update clearing due",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "due": ""
+    }
+   }
+  },
+  {
+   "name": "update clearing done_at",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "done_at": "",
+     "status": "todo"
+    }
+   }
+  },
+  {
+   "name": "complete a task",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "status": "done",
+     "done_at": "2026-10-16T14:00:00Z"
+    }
+   }
+  },
+  {
+   "name": "pin + color a note",
+   "op": {
+    "op": "update",
+    "coll": "notes",
+    "id": "n-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "pinned": true,
+     "color": "pink"
+    }
+   }
+  },
+  {
+   "name": "add request with extra keys",
+   "op": {
+    "op": "add",
+    "coll": "requests",
+    "ts": "2026-10-16T14:00:00Z",
+    "item": {
+     "id": "r-1",
+     "item": "Gloves (M)",
+     "whatever": 3
+    }
+   }
+  },
+  {
+   "name": "delete note",
+   "op": {
+    "op": "delete",
+    "coll": "notes",
+    "id": "n-1",
+    "ts": "2026-10-16T14:00:00Z"
+   }
+  },
+  {
+   "name": "over-long title is clamped, not rejected",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+   }
+  },
+  {
+   "name": "non-http link is coerced, not rejected",
+   "op": {
+    "op": "update",
+    "coll": "requests",
+    "id": "r-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "link": "ftp://x"
+    }
+   }
+  },
+  {
+   "name": "ts with offset",
+   "op": {
+    "op": "delete",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T10:00:00-04:00"
+   }
+  },
+  {
+   "name": "negative float rank",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "rank": -3.25
+    }
+   }
+  },
+  {
+   "name": "tags list",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "tags": [
+      "#bio",
+      "urgent"
+     ]
+    }
+   }
+  }
+ ],
+ "invalid_ops": [
+  {
+   "name": "unknown op",
+   "op": {
+    "op": "move",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z"
+   }
+  },
+  {
+   "name": "unknown collection",
+   "op": {
+    "op": "delete",
+    "coll": "people",
+    "id": "p-1",
+    "ts": "2026-10-16T14:00:00Z"
+   }
+  },
+  {
+   "name": "missing ts",
+   "op": {
+    "op": "delete",
+    "coll": "tasks",
+    "id": "t-1"
+   }
+  },
+  {
+   "name": "bad ts",
+   "op": {
+    "op": "delete",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "yesterday"
+   }
+  },
+  {
+   "name": "not an object",
+   "op": "delete t-1"
+  },
+  {
+   "name": "add without item",
+   "op": {
+    "op": "add",
+    "coll": "tasks",
+    "ts": "2026-10-16T14:00:00Z"
+   }
+  },
+  {
+   "name": "add with empty title",
+   "op": {
+    "op": "add",
+    "coll": "tasks",
+    "ts": "2026-10-16T14:00:00Z",
+    "item": {
+     "id": "t-1",
+     "title": "   "
+    }
+   }
+  },
+  {
+   "name": "add with bad id",
+   "op": {
+    "op": "add",
+    "coll": "tasks",
+    "ts": "2026-10-16T14:00:00Z",
+    "item": {
+     "id": "has space",
+     "title": "x"
+    }
+   }
+  },
+  {
+   "name": "add without id",
+   "op": {
+    "op": "add",
+    "coll": "tasks",
+    "ts": "2026-10-16T14:00:00Z",
+    "item": {
+     "title": "x"
+    }
+   }
+  },
+  {
+   "name": "update without id",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "title": "x"
+    }
+   }
+  },
+  {
+   "name": "delete with bad id",
+   "op": {
+    "op": "delete",
+    "coll": "tasks",
+    "id": "a/b",
+    "ts": "2026-10-16T14:00:00Z"
+   }
+  },
+  {
+   "name": "update with empty set",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {}
+   }
+  },
+  {
+   "name": "update set not an object",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": [
+     "title"
+    ]
+   }
+  },
+  {
+   "name": "update non-editable id",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "id": "t-2"
+    }
+   }
+  },
+  {
+   "name": "update non-editable created_at",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "created_at": "2026-10-16T14:00:00Z"
+    }
+   }
+  },
+  {
+   "name": "update field from another collection",
+   "op": {
+    "op": "update",
+    "coll": "notes",
+    "id": "n-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "title": "x"
+    }
+   }
+  },
+  {
+   "name": "bad enum",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "status": "blocked"
+    }
+   }
+  },
+  {
+   "name": "enum is case-sensitive in ops",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "priority": "High"
+    }
+   }
+  },
+  {
+   "name": "wrong type for string",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "priority": 3
+    }
+   }
+  },
+  {
+   "name": "blank required text",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "title": " \n "
+    }
+   }
+  },
+  {
+   "name": "bad due format",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "due": "10/16/2026"
+    }
+   }
+  },
+  {
+   "name": "impossible due date",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "due": "2026-02-30"
+    }
+   }
+  },
+  {
+   "name": "bad done_at",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "done_at": "today"
+    }
+   }
+  },
+  {
+   "name": "pinned must be bool",
+   "op": {
+    "op": "update",
+    "coll": "notes",
+    "id": "n-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "pinned": "true"
+    }
+   }
+  },
+  {
+   "name": "rank must be a number",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "rank": "1"
+    }
+   }
+  },
+  {
+   "name": "rank must not be a bool",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "rank": true
+    }
+   }
+  },
+  {
+   "name": "tags must be a list",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "tags": "a,b"
+    }
+   }
+  },
+  {
+   "name": "tags must be strings",
+   "op": {
+    "op": "update",
+    "coll": "tasks",
+    "id": "t-1",
+    "ts": "2026-10-16T14:00:00Z",
+    "set": {
+     "tags": [
+      "a",
+      1
+     ]
+    }
+   }
+  }
+ ],
+ "serialize": [
+  {
+   "name": "integral float ranks written as ints; unicode not escaped; trailing newline",
+   "input_text": "{\"schema\": 1, \"tasks\": [{\"id\": \"a\", \"title\": \"Café ✓\", \"rank\": 3.0}, {\"id\": \"b\", \"title\": \"B\", \"rank\": 0.5}]}",
+   "output_text": "{\n  \"schema\": 1,\n  \"updated_at\": \"\",\n  \"updated_by\": \"\",\n  \"tasks\": [\n    {\n      \"id\": \"b\",\n      \"title\": \"B\",\n      \"notes\": \"\",\n      \"status\": \"todo\",\n      \"priority\": \"normal\",\n      \"assignee\": \"\",\n      \"due\": \"\",\n      \"tags\": [],\n      \"rank\": 0.5,\n      \"created_at\": \"1970-01-01T00:00:00Z\",\n      \"updated_at\": \"1970-01-01T00:00:00Z\",\n      \"done_at\": \"\",\n      \"created_by\": \"\"\n    },\n    {\n      \"id\": \"a\",\n      \"title\": \"Café ✓\",\n      \"notes\": \"\",\n      \"status\": \"todo\",\n      \"priority\": \"normal\",\n      \"assignee\": \"\",\n      \"due\": \"\",\n      \"tags\": [],\n      \"rank\": 3,\n      \"created_at\": \"1970-01-01T00:00:00Z\",\n      \"updated_at\": \"1970-01-01T00:00:00Z\",\n      \"done_at\": \"\",\n      \"created_by\": \"\"\n    }\n  ],\n  \"requests\": [],\n  \"notes\": []\n}\n"
+  }
+ ]
+}

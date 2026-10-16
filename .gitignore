@@ -10,3 +10,5 @@ state/
 *.log
 .DS_Store
 node_modules/
+# install-pi.sh temp files (may briefly hold the token)
+config.json.*

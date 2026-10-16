@@ -1,7 +1,11 @@
 [Desktop Entry]
+# TEMPLATE — scripts/install-pi.sh fills in the folder placeholder and installs the
+# result as ~/.config/autostart/lab-hub-kiosk.desktop, so the fullscreen
+# dashboard opens when the Pi's desktop session starts (X11 and Wayland).
+# Delete that file to stop autostarting the kiosk.
 Type=Application
 Name=Lab Hub Kiosk
-# Autostarts the fullscreen browser when the Pi desktop session logs in.
-# Copy to ~/.config/autostart/ and edit the path to match where lab-hub lives.
-Exec=/home/pi/lab-hub/kiosk.sh
+Comment=Open the Lab Hub dashboard fullscreen
+Exec=/bin/bash "__APP_DIR__/kiosk.sh"
+Terminal=false
 X-GNOME-Autostart-enabled=true

@@ -1,0 +1,55 @@
+# Publishes static/ (unchanged, no build step) to GitHub Pages:
+#   https://richard-0417.github.io/lab-hub/
+#
+# Runs on pushes to main that touch static/ or this file, or by hand from the
+# Actions tab ("Run workflow"). Board data lives on the `data` branch, so the
+# commits the Pi and browsers make there never trigger a deploy.
+#
+# One-time setup: repo Settings -> Pages -> Build and deployment ->
+# Source: "GitHub Actions".
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "static/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let an in-progress deploy finish instead of
+# cancelling it half-way.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Sanity check static/
+        run: test -f static/index.html
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload static/ as the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: static
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

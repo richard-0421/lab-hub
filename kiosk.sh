@@ -1,32 +1,120 @@
 #!/usr/bin/env bash
-# Open the dashboard fullscreen in Chromium on the Pi's display.
-# Waits for the web server to answer, then launches the browser in kiosk mode.
+# Opens Lab Hub fullscreen in Chromium on the Pi's own screen (X11 or Wayland).
+#
+# Started at login by ~/.config/autostart/lab-hub-kiosk.desktop and, on labwc /
+# wayfire desktops, by their autostart files (scripts/install-pi.sh sets these
+# up). Several of those may fire at once, so only one copy ever runs.
+#
+#   LABHUB_URL          page to open (default http://localhost:<port>, port from
+#                       LABHUB_PORT or config.json, else 8000)
+#   LABHUB_KIOSK_FLAGS  extra Chromium flags, space-separated
+#                       (e.g. "--force-device-scale-factor=1.25")
+#   ~/.config/lab-hub-kiosk.flags   the same, kept in a file (one or more flags
+#                       per line, # comments allowed) — easier for autostart
+#
+# Leave the kiosk: Alt+F4 closes it (or Ctrl+Alt+T for a terminal, then
+# `pkill -f lab-hub-kiosk`). Run this script again to bring it back.
+# Don't edit this file on the Pi: local changes pause the auto-updater.
 set -u
-URL="${LABHUB_URL:-http://localhost:8000}"
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
-# wait until the server is up (max ~30s)
-for _ in $(seq 1 30); do
-  if command -v curl >/dev/null 2>&1 && curl -sf "$URL/api/config" >/dev/null 2>&1; then
-    break
+# --- one copy only ----------------------------------------------------------
+LOCK="${XDG_RUNTIME_DIR:-/tmp}/lab-hub-kiosk.lock"
+if command -v flock >/dev/null 2>&1 && { exec 9>"$LOCK"; } 2>/dev/null; then
+  if ! flock -n 9; then
+    echo "lab-hub kiosk is already running"
+    exit 0
   fi
+fi
+
+# --- which URL --------------------------------------------------------------
+URL="${LABHUB_URL:-}"
+if [ -z "$URL" ]; then
+  PORT="${LABHUB_PORT:-}"
+  if [ -z "$PORT" ] && command -v python3 >/dev/null 2>&1; then
+    PORT="$(python3 -c '
+import json
+try:
+    print(int(json.load(open("config.json", encoding="utf-8")).get("port") or 8000))
+except Exception:
+    print(8000)
+' 2>/dev/null)"
+  fi
+  URL="http://localhost:${PORT:-8000}"
+fi
+
+# --- wait for the server (up to ~2 min; the Pi may still be booting) ---------
+server_up() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -sf -o /dev/null --max-time 3 "$URL/api/config"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=3)' \
+      "$URL/api/config" >/dev/null 2>&1
+  else
+    sleep 20   # no way to check; give the service a head start
+  fi
+}
+for _ in $(seq 1 120); do
+  server_up && break
   sleep 1
 done
 
-# pick whichever Chromium binary this Pi OS ships
+# --- find Chromium (Raspberry Pi OS ships one of these names) ----------------
 BROWSER=""
-for cand in chromium-browser chromium chromium-browser-v7; do
+for cand in chromium-browser chromium; do
   command -v "$cand" >/dev/null 2>&1 && { BROWSER="$cand"; break; }
 done
-[ -n "$BROWSER" ] || { echo "Chromium not found. Install with: sudo apt install chromium-browser"; exit 1; }
+if [ -z "$BROWSER" ]; then
+  echo "Chromium not found. Install it with: sudo apt install chromium-browser   (or: chromium)" >&2
+  exit 1
+fi
 
-# stop the display from blanking while the kiosk is up
-command -v xset >/dev/null 2>&1 && { xset s off; xset -dpms; xset s noblank; }
+# --- keep the screen on -------------------------------------------------------
+# X11 (Bullseye / "X11" option in raspi-config): xset works directly.
+# Wayland (Bookworm wayfire / labwc): xset has no effect. Turn blanking off with
+#   sudo raspi-config  ->  Display Options  ->  Screen Blanking  ->  No
+# (wayfire: or set  [idle] dpms_timeout = -1  in ~/.config/wayfire.ini).
+if command -v xset >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
+  xset s off 2>/dev/null || true
+  xset -dpms 2>/dev/null || true
+  xset s noblank 2>/dev/null || true
+fi
 
-exec "$BROWSER" \
-  --kiosk \
-  --incognito \
-  --noerrdialogs \
-  --disable-infobars \
-  --disable-session-crashed-bubble \
-  --check-for-update-interval=31536000 \
+# --- launch -----------------------------------------------------------------
+# A dedicated profile dir makes this a separate Chromium instance, so the flags
+# below apply even if someone already has a normal Chromium window open.
+PROFILE="${XDG_CONFIG_HOME:-$HOME/.config}/lab-hub-kiosk"
+mkdir -p "$PROFILE" 2>/dev/null || true
+
+FLAGS=(
+  --kiosk
   --app="$URL"
+  --incognito
+  --user-data-dir="$PROFILE"
+  --no-first-run
+  --noerrdialogs
+  --disable-infobars
+  --disable-session-crashed-bubble
+  --password-store=basic
+  --check-for-update-interval=31536000
+  --ozone-platform-hint=auto
+  # touch screen: no swipe-to-go-back, no pinch zoom, no translate popups
+  --overscroll-history-navigation=0
+  --disable-pinch
+  --disable-features=Translate
+)
+FLAGS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/lab-hub-kiosk.flags"
+EXTRA="${LABHUB_KIOSK_FLAGS:-}"
+if [ -f "$FLAGS_FILE" ]; then
+  EXTRA="$EXTRA $(sed -e 's/#.*//' "$FLAGS_FILE" | tr '\n' ' ')"
+fi
+if [ -n "${EXTRA// /}" ]; then
+  # Intentionally split on whitespace (globbing off so '*' stays literal).
+  set -f
+  # shellcheck disable=SC2206
+  FLAGS+=( $EXTRA )
+  set +f
+fi
+
+echo "lab-hub kiosk: opening $URL with $BROWSER"
+exec "$BROWSER" "${FLAGS[@]}"

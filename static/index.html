@@ -2,105 +2,202 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#0a0c10" />
+  <meta name="description" content="Lab Hub: the lab's shared task board, item requests and notes." />
   <title>Lab Hub</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="favicon.svg" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="style.css" />
+  <script>
+    // Apply the theme before first paint (no flash). js/ui/theme.js owns the full logic.
+    (function () {
+      var t = null;
+      try { t = new URLSearchParams(location.search).get("theme"); } catch (e) {}
+      if (t !== "dark" && t !== "light" && t !== "auto") {
+        try { t = localStorage.getItem("labhub:theme"); } catch (e) { t = null; }
+      }
+      if (t === "auto" || (t !== "dark" && t !== "light" && /\.github\.io$/i.test(location.hostname))) {
+        t = window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      }
+      document.documentElement.setAttribute("data-theme", t === "light" ? "light" : "dark");
+    })();
+  </script>
+  <script type="module" src="js/app.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="clock-wrap">
-      <span id="clock" class="clock">--:--</span>
-      <span id="date" class="date"></span>
-    </div>
-    <div id="subgroup" class="subgroup">Lab hub</div>
-    <div class="health">
-      <span id="h-camera" class="badge">camera</span>
-      <span id="h-meter" class="badge">meter</span>
-      <span id="h-logging" class="badge">logging</span>
-    </div>
-  </header>
+  <a class="skip-link" href="#board">Skip to tasks</a>
 
-  <main class="grid">
-    <!-- Calendar -->
-    <section class="card" id="card-calendar">
-      <h2 class="card-title">Calendar</h2>
-      <div id="calendar" class="cal-list">
-        <p class="empty">Loading…</p>
-      </div>
-    </section>
-
-    <!-- pFLARES live monitor -->
-    <section class="card hero" id="card-monitor">
-      <div class="card-head">
-        <h2 class="card-title">pFLARES live monitor</h2>
-        <span id="rec-badge" class="rec idle">idle</span>
-      </div>
-
-      <div class="level-row">
-        <span id="level" class="level">--</span>
-        <span class="level-unit">mm water level</span>
-      </div>
-      <canvas id="spark" class="spark" width="600" height="90"></canvas>
-
-      <div class="temps" id="temps">
-        <div class="temp"><span class="t-label">T1</span><span class="t-val" id="T1">--</span></div>
-        <div class="temp"><span class="t-label">T2</span><span class="t-val" id="T2">--</span></div>
-        <div class="temp"><span class="t-label">T3</span><span class="t-val" id="T3">--</span></div>
-        <div class="temp"><span class="t-label">T4</span><span class="t-val" id="T4">--</span></div>
-      </div>
-
-      <div id="monitor-file" class="monitor-file">No CSV detected</div>
-
-      <div class="btn-row">
-        <button id="btn-launch" class="btn">Launch tracker</button>
-        <button id="btn-stop" class="btn">Stop</button>
-      </div>
-      <div id="tracker-msg" class="tracker-msg"></div>
-    </section>
-
-    <!-- Tasks -->
-    <section class="card" id="card-tasks">
-      <h2 class="card-title">Tasks</h2>
-      <div id="tasks" class="task-list"></div>
-      <form id="task-form" class="add-form">
-        <input id="task-input" type="text" placeholder="Add a task" autocomplete="off" />
-        <button class="btn icon" type="submit" aria-label="Add task">+</button>
-      </form>
-    </section>
-
-    <!-- Requests -->
-    <section class="card" id="card-requests">
-      <h2 class="card-title">Item requests</h2>
-      <div id="requests" class="req-list"></div>
-      <form id="req-form" class="add-form col">
-        <input id="req-item" type="text" placeholder="Item / thing to order" autocomplete="off" />
-        <div class="add-form">
-          <input id="req-by" type="text" placeholder="Your name" autocomplete="off" />
-          <button class="btn icon" type="submit" aria-label="Add request">+</button>
+  <div class="app" id="app">
+    <!-- ================================================================ header -->
+    <header class="topbar" id="topbar">
+      <div class="clock-block" aria-live="off">
+        <div class="clock" id="clock"><span class="clock-hm" id="clock-hm">--:--</span><span class="clock-side"><span class="clock-s" id="clock-s"></span><span class="clock-ap" id="clock-ap"></span></span></div>
+        <div class="date-stack">
+          <div class="greeting" id="greeting">&nbsp;</div>
+          <div class="date" id="date">&nbsp;</div>
         </div>
-      </form>
-    </section>
+      </div>
 
-    <!-- Notes -->
-    <section class="card" id="card-notes">
-      <h2 class="card-title">Notes board</h2>
-      <div id="notes" class="note-list"></div>
-      <form id="note-form" class="add-form col">
-        <textarea id="note-body" rows="2" placeholder="Leave a note for the team"></textarea>
-        <div class="add-form">
-          <input id="note-author" type="text" placeholder="Your name" autocomplete="off" />
-          <button class="btn icon" type="submit" aria-label="Add note">+</button>
+      <div class="brand" id="brand">
+        <img class="brand-mark" src="favicon.svg" alt="" width="28" height="28" />
+        <div class="brand-text">
+          <div class="brand-name" id="lab-name">Lab Hub</div>
+          <div class="brand-sub" id="lab-sub"></div>
         </div>
-      </form>
-    </section>
-  </main>
+      </div>
 
-  <footer class="statusbar">
-    <span id="s-sample">last sample —</span>
-    <span id="s-url"></span>
-    <span id="s-updated">—</span>
-  </footer>
+      <div class="top-actions">
+        <div class="sync-wrap" id="sync-wrap">
+          <button type="button" class="sync-pill tone-muted" id="sync-pill" aria-haspopup="dialog" aria-expanded="false" aria-controls="sync-pop">
+            <span class="sync-ico" id="sync-ico"></span><span class="sync-text" id="sync-text">Connecting…</span>
+          </button>
+          <div class="popover sync-pop" id="sync-pop" role="dialog" aria-label="Sync details" hidden></div>
+        </div>
+        <button type="button" class="icon-btn" id="theme-btn" aria-label="Switch theme" title="Switch theme"><span data-icon="moon" class="theme-ico-dark"></span><span data-icon="sun" class="theme-ico-light"></span></button>
+        <button type="button" class="icon-btn gh-only" id="settings-btn" aria-label="GitHub settings" title="GitHub settings"><span data-icon="settings"></span></button>
+      </div>
+    </header>
 
-  <script src="/static/app.js"></script>
+    <!-- ================================================================ main -->
+    <main class="layout" id="layout">
+      <section class="panel board" id="board" aria-labelledby="board-title" tabindex="-1">
+        <div class="board-head">
+          <div class="board-title">
+            <h1 id="board-title">Tasks</h1>
+            <span class="pill-count" id="open-count">0 open</span>
+          </div>
+
+          <div class="quickadd" id="quickadd">
+            <span data-icon="plus" class="qa-ico"></span>
+            <input id="qa-input" type="text" autocomplete="off" autocapitalize="sentences" spellcheck="false" enterkeyhint="done"
+              aria-label="Quick add a task" aria-describedby="qa-hint"
+              placeholder="Add a task…  @name  !high  #tag  ^fri" />
+            <kbd class="qa-kbd" aria-hidden="true">Enter</kbd>
+            <div class="qa-preview" id="qa-preview" hidden></div>
+            <span class="sr-only" id="qa-hint">Type a task and press Enter. Use @name to assign, !high or !low for priority, #tag for tags and ^fri or due:tomorrow for a due date.</span>
+          </div>
+
+          <div class="board-tools" id="board-tools">
+            <label class="field search-field">
+              <span data-icon="search"></span>
+              <input id="search" type="search" placeholder="Search tasks" autocomplete="off" aria-label="Search tasks" />
+              <button type="button" class="field-clear" id="search-clear" aria-label="Clear search" hidden><span data-icon="x"></span></button>
+            </label>
+            <label class="field select-field" title="Filter by person">
+              <span data-icon="users"></span>
+              <select id="filter-assignee" aria-label="Filter by person"><option value="">Everyone</option></select>
+              <span data-icon="chevron" class="select-chev"></span>
+            </label>
+            <label class="field select-field" title="Sort tasks">
+              <span data-icon="sort"></span>
+              <select id="sort" aria-label="Sort tasks">
+                <option value="manual">Manual</option>
+                <option value="priority">Priority</option>
+                <option value="due">Due date</option>
+              </select>
+              <span data-icon="chevron" class="select-chev"></span>
+            </label>
+            <button type="button" class="btn btn-primary edit-only" id="new-task"><span data-icon="plus"></span><span>New task</span></button>
+          </div>
+        </div>
+
+        <div class="status-tabs" id="status-tabs" role="tablist" aria-label="Task status">
+          <button type="button" role="tab" class="status-tab" data-status="todo" aria-selected="true"><span class="dot"></span><span>To do</span><span class="tab-count">0</span></button>
+          <button type="button" role="tab" class="status-tab" data-status="doing" aria-selected="false"><span class="dot"></span><span>In progress</span><span class="tab-count">0</span></button>
+          <button type="button" role="tab" class="status-tab" data-status="done" aria-selected="false"><span class="dot"></span><span>Done</span><span class="tab-count">0</span></button>
+        </div>
+
+        <div class="columns" id="columns" data-tab="todo">
+          <section class="column" data-status="todo" aria-labelledby="col-todo">
+            <header class="col-head">
+              <span class="dot"></span><h2 id="col-todo">To do</h2><span class="col-count">0</span>
+              <span class="col-actions"><button type="button" class="icon-btn sm col-add edit-only" data-status="todo" aria-label="Add a task to To do" title="Add to To do"><span data-icon="plus"></span></button></span>
+            </header>
+            <div class="col-list" role="list" aria-labelledby="col-todo"></div>
+          </section>
+          <section class="column" data-status="doing" aria-labelledby="col-doing">
+            <header class="col-head">
+              <span class="dot"></span><h2 id="col-doing">In progress</h2><span class="col-count">0</span>
+              <span class="col-actions"><button type="button" class="icon-btn sm col-add edit-only" data-status="doing" aria-label="Add a task to In progress" title="Add to In progress"><span data-icon="plus"></span></button></span>
+            </header>
+            <div class="col-list" role="list" aria-labelledby="col-doing"></div>
+          </section>
+          <section class="column" data-status="done" aria-labelledby="col-done">
+            <header class="col-head">
+              <span class="dot"></span><h2 id="col-done">Done</h2><span class="col-count">0</span>
+              <span class="col-actions"><button type="button" class="btn btn-ghost sm clear-btn edit-only" id="clear-done" hidden>Clear done</button></span>
+            </header>
+            <div class="col-list" role="list" aria-labelledby="col-done"></div>
+          </section>
+        </div>
+      </section>
+
+      <aside class="rail" id="rail" aria-label="Lab info">
+        <section class="panel rail-card" id="card-calendar" aria-labelledby="cal-title">
+          <header class="card-head">
+            <span class="card-ico ico-cal"><span data-icon="calendar"></span></span>
+            <h2 class="card-title" id="cal-title">Today &amp; upcoming</h2>
+            <span class="card-head-side" id="cal-side"></span>
+          </header>
+          <div class="card-body" id="cal-body"><div class="skeleton-list"><div class="sk"></div><div class="sk"></div><div class="sk"></div></div></div>
+        </section>
+
+        <section class="panel rail-card" id="card-requests" aria-labelledby="req-title">
+          <header class="card-head">
+            <span class="card-ico ico-req"><span data-icon="box"></span></span>
+            <h2 class="card-title" id="req-title">Item requests</h2>
+            <span class="pill-count" id="req-count" hidden></span>
+            <span class="card-head-side"><button type="button" class="btn btn-ghost sm clear-btn edit-only" id="clear-received" hidden>Clear received</button><button type="button" class="icon-btn sm card-add edit-only" data-form="req-form" aria-label="Request an item" title="Request an item"><span data-icon="plus"></span></button></span>
+          </header>
+          <div class="card-body" id="req-body" role="list"></div>
+          <form class="addform edit-only" id="req-form" autocomplete="off">
+            <div class="addform-row">
+              <input name="item" type="text" placeholder="Request an item…" aria-label="Item to request" maxlength="300" />
+              <button type="submit" class="icon-btn filled" aria-label="Add request"><span data-icon="plus"></span></button>
+            </div>
+            <div class="addform-more">
+              <input name="qty" type="text" placeholder="Qty" aria-label="Quantity" maxlength="40" class="qty" />
+              <input name="by" type="text" placeholder="Your name" aria-label="Your name" maxlength="60" />
+            </div>
+          </form>
+        </section>
+
+        <section class="panel rail-card" id="card-notes" aria-labelledby="notes-title">
+          <header class="card-head">
+            <span class="card-ico ico-note"><span data-icon="note"></span></span>
+            <h2 class="card-title" id="notes-title">Notes</h2>
+            <span class="pill-count" id="notes-count" hidden></span>
+            <span class="card-head-side"><button type="button" class="icon-btn sm card-add edit-only" data-form="note-form" aria-label="Leave a note" title="Leave a note"><span data-icon="plus"></span></button></span>
+          </header>
+          <div class="card-body notes-grid" id="notes-body"></div>
+          <form class="addform edit-only" id="note-form" autocomplete="off">
+            <div class="addform-row">
+              <textarea name="body" rows="1" placeholder="Leave a note for the team…" aria-label="New note" maxlength="2000"></textarea>
+              <button type="submit" class="icon-btn filled" aria-label="Post note"><span data-icon="plus"></span></button>
+            </div>
+            <div class="addform-more">
+              <div class="color-dots" role="radiogroup" aria-label="Note colour" id="note-colors"></div>
+              <input name="by" type="text" placeholder="Your name" aria-label="Your name" maxlength="60" />
+            </div>
+          </form>
+        </section>
+      </aside>
+    </main>
+
+    <!-- ================================================================ footer -->
+    <footer class="footer" id="footer">
+      <span class="foot-item" id="foot-pages" hidden></span>
+      <span class="foot-item" id="foot-lan" hidden></span>
+      <span class="foot-item foot-updated" id="foot-updated"></span>
+    </footer>
+  </div>
+
+  <button type="button" class="fab edit-only" id="fab" aria-label="New task"><span data-icon="plus"></span></button>
+  <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <noscript><div class="noscript">Lab Hub needs JavaScript.</div></noscript>
 </body>
 </html>
