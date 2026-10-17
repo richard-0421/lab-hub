@@ -205,13 +205,19 @@ class InstallHelperCheckTest(unittest.TestCase):
         self.assertNotIn("Single-repo setup", out)
 
     def test_missing_board_branch_in_the_single_repo(self):
-        # The first sync would create "data" from main (a copy of the code),
-        # and the prepared orphan branch could then no longer be pushed.
+        # The first sync creates "data" by itself as an orphan empty board, so
+        # sync works; but the owner's prepared orphan branch could then only
+        # be pushed with --force, so it is still flagged (a WARNING in
+        # install-pi.sh).
         self.gh.repo(self.CODE, branch=None)
         self.gh.blobs(self.CODE, 201)
         out = self.run_check()
-        self.assertIn("PROBLEM: o/lab-hub has no 'data' branch yet. Push it before Lab Hub syncs", out)
-        self.assertIn("from 'main'", out)
+        self.assertIn("PROBLEM: o/lab-hub has no 'data' branch yet. Lab Hub's first sync creates it "
+                      "automatically as an empty board", out)
+        self.assertIn("push it first (git push origin data)", out)
+        self.assertIn("--force", out)
+        self.assertNotIn("copy of the code", out)
+        self.assertNotIn("from 'main'", out)
         self.assertIn(self.SINGLE_NOTE, out)
 
     def test_configured_branch_is_the_one_checked(self):
@@ -263,7 +269,8 @@ class InstallHelperCheckTest(unittest.TestCase):
         self.gh.blobs(self.DATA, 201)
         self.gh.blobs(self.CODE, 403, "Resource not accessible by personal access token")
         out = self.run_check(repo=self.DATA)
-        self.assertIn("NOTE: o/lab-hub-data has no 'data' branch yet; the first sync creates it", out)
+        self.assertIn("NOTE: o/lab-hub-data has no 'data' branch yet; the first sync creates it "
+                      "as an empty board", out)
         self.assertNotIn("PROBLEM", out)
 
 
@@ -712,7 +719,8 @@ class InstallPiSingleRepoTest(unittest.TestCase):
         self.gh.repo(self.REPO, branch=None)
         self.gh.blobs(self.REPO, 201)
         out = self.install()
-        self.assertIn("WARNING: %s has no 'data' branch yet. Push it before Lab Hub syncs" % self.REPO, out)
+        self.assertIn("WARNING: %s has no 'data' branch yet. Lab Hub's first sync creates it "
+                      "automatically as an empty board" % self.REPO, out)
 
 
 if __name__ == "__main__":

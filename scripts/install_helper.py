@@ -243,8 +243,7 @@ def check(cur, origin):
 
     code = code_repo_from_origin(origin)
     single = bool(code) and code.lower() == repo.lower()
-    check_branch(api, token, repo, s(cur, "github_branch") or DEFAULT_BRANCH,
-                 body.get("default_branch") or "main", single)
+    check_branch(api, token, repo, s(cur, "github_branch") or DEFAULT_BRANCH, single)
 
     if not code:
         return
@@ -273,10 +272,12 @@ def check(cur, origin):
         print("OK: the token can't change the code repo %s (good)" % code)
 
 
-def check_branch(api, token, repo, branch, default_branch, single):
-    """Warn when the board branch doesn't exist yet: the first sync would then
-    create it from the default branch (in a single-repo setup: a copy of the
-    code, which also stops the prepared orphan branch from being pushed)."""
+def check_branch(api, token, repo, branch, single):
+    """Say so when the board branch doesn't exist yet. The first sync (Pi or
+    browser) then creates it by itself as an orphan branch holding only an
+    empty board.json, so nothing breaks; but in the single-repo setup the
+    owner normally prepared that branch locally, and once Lab Hub has created
+    its own, the prepared one can only be pushed with --force."""
     from urllib.parse import quote
 
     try:
@@ -287,12 +288,14 @@ def check_branch(api, token, repo, branch, default_branch, single):
     if status != 404:
         return
     if single:
-        print("PROBLEM: %s has no '%s' branch yet. Push it before Lab Hub syncs "
-              "(README: One-time GitHub setup); otherwise the first sync creates it from "
-              "'%s', with a copy of the code in it." % (repo, branch, default_branch))
+        print("PROBLEM: %s has no '%s' branch yet. Lab Hub's first sync creates it "
+              "automatically as an empty board (no code in it). If you prepared the "
+              "'%s' branch on your computer, push it first (git push origin %s); once "
+              "Lab Hub has created its own, yours can only be pushed with --force."
+              % (repo, branch, branch, branch))
     else:
-        print("NOTE: %s has no '%s' branch yet; the first sync creates it from '%s'."
-              % (repo, branch, default_branch))
+        print("NOTE: %s has no '%s' branch yet; the first sync creates it as an empty "
+              "board." % (repo, branch))
 
 
 # --------------------------------------------------------------------------- #
