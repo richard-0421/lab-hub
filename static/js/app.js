@@ -28,7 +28,7 @@ import { openSetup } from "./ui/setup.js";
 import { dialogOpen, openDialog } from "./ui/dialog.js";
 import { dayKey, displayUrl, plural, relTime } from "./ui/format.js";
 import { NAME_KEY, SORT_KEY, getName, pget, pset, setName } from "./ui/prefs.js";
-import { forgetGitHub, hasDraft, isKioskHost, isLoopbackHost, personName, unsentOps, versionReloadBlocker } from "./ui/lifecycle.js";
+import { forgetGitHub, hasDraft, isKioskHost, isLoopbackHost, personName, versionReloadCheck } from "./ui/lifecycle.js";
 
 const $ = (id) => document.getElementById(id);
 const root = document.documentElement;
@@ -284,6 +284,51 @@ function startGitHub(settings) {
   notes.setDefaults();
 }
 
+// What to tell the user after connecting (from the setup dialog): a note when
+// write access couldn't be confirmed, and warnings (two-repo setup only).
+// Neither blocks. A Settings change reloads the page, so they wait in
+// sessionStorage and are shown after the reload.
+const NOTICE_KEY = "labhub:connect-notice";
+
+function connectNotices(info) {
+  const { note = null, warnings = [] } = info || {};
+  const out = [];
+  if (note) out.push({ message: note, kind: "info", timeout: 12000 });
+  for (const w of warnings || []) out.push({ message: w, kind: "warn", timeout: 15000 });
+  return out;
+}
+
+function showNotices(list) {
+  for (const n of list) toast(n);
+}
+
+function stashNotices(list) {
+  try {
+    if (list.length) sessionStorage.setItem(NOTICE_KEY, JSON.stringify(list));
+  } catch (_) {
+    // storage blocked: the notes are lost, the connection isn't
+  }
+}
+
+function showStashedNotices() {
+  let list = [];
+  try {
+    const raw = sessionStorage.getItem(NOTICE_KEY);
+    sessionStorage.removeItem(NOTICE_KEY);
+    list = raw ? JSON.parse(raw) : [];
+  } catch (_) {
+    list = [];
+  }
+  if (!Array.isArray(list)) return;
+  const kinds = ["info", "warn"];
+  showNotices(
+    list
+      .filter((n) => n && typeof n.message === "string" && n.message)
+      .slice(0, 3)
+      .map((n) => ({ message: n.message.slice(0, 400), kind: kinds.includes(n.kind) ? n.kind : "info", timeout: 15000 })),
+  );
+}
+
 function openSettings({ firstRun = false } = {}) {
   if (ctx.mode !== "github") return;
   let decided = false;
@@ -293,14 +338,19 @@ function openSettings({ firstRun = false } = {}) {
     existing: !firstRun,
     hasToken: !!(ctx.settings && ctx.settings.token),
     pending: (ctx.sync && ctx.sync.pending) || 0,
-    onConnect: (s) => {
+    onConnect: (s, info) => {
       decided = true;
       const saved = saveGitHubSettings(s);
       if (saved.clientName) setName(saved.clientName);
+      const notices = connectNotices(info);
       if (firstRun) {
         startGitHub(saved);
         toast({ message: `Connected to ${saved.repo}`, kind: "success", timeout: 3500 });
-      } else location.reload();
+        showNotices(notices);
+      } else {
+        stashNotices(notices);
+        location.reload();
+      }
     },
     onReadOnly: (s) => {
       decided = true;
@@ -419,8 +469,11 @@ function watchVersion() {
   let base = null;
   let pendingSince = 0; // when a new version was first seen
   let retry = 0;
+  let busy = false; // a check (and its flush) is still running
   const check = async () => {
     clearTimeout(retry);
+    if (busy) return;
+    busy = true;
     try {
       const r = await fetch("api/version", { cache: "no-store", headers: { Accept: "application/json" } });
       if (!r.ok) return;
@@ -435,20 +488,23 @@ function watchVersion() {
         return;
       }
       if (!pendingSince) pendingSince = Date.now();
-      const why = versionReloadBlocker({
+      // Unsent kiosk edits are pushed first (source.flush) and the page looked
+      // at again, so a reload never drops them.
+      const why = await versionReloadCheck(ctx.source, () => ({
         now: Date.now(),
         pendingSince,
         lastInputAt,
-        unsent: unsentOps(ctx.source),
         dragging: ctx.dragging,
         dialogOpen: dialogOpen(),
         focusedDraft: hasDraft(document.activeElement),
-      });
+      }));
       if (!why) location.reload();
-      // Unsent kiosk edits flush on the next 3 s poll: look again soon.
+      // Still unsent (the Pi is busy or unreachable): look again soon.
       else if (why === "unsent") retry = setTimeout(check, 5000);
     } catch (_) {
       // server restarting — try again next minute
+    } finally {
+      busy = false;
     }
   };
   check();
@@ -542,7 +598,10 @@ async function boot() {
   } else {
     setDefaultTheme("auto");
     const saved = loadGitHubSettings();
-    if (saved) startGitHub(saved);
+    if (saved) {
+      startGitHub(saved);
+      showStashedNotices();
+    }
     else {
       const t = repoTitle(defaultGitHubSettings().repo);
       header.setName(t.name, t.owner);

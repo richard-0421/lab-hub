@@ -196,9 +196,14 @@ class Store:
         path="board.json",
         api="",
         client_name="lab-pi",
+        config_error="",
     ):
         self.state_dir = state_dir
         self.github_enabled = bool(github_enabled)
+        # Why the configured repo / branch / path can't be used (sync is then
+        # off). Shown as last_error while sync is off; never persisted, so it
+        # disappears with the bad setting.
+        self.config_error = config_error or None
         self.repo = repo or ""
         self.branch = branch or "data"
         self.path = path or "board.json"
@@ -509,8 +514,12 @@ class Store:
     def sync_status(self):
         with self._lock:
             n = len(self._pending)
+            last_error = self._last_error
             if not self.github_enabled:
                 state = "off"
+                # nothing talks to GitHub now: an error kept in sync.json from
+                # when sync was on is stale; only a config problem applies
+                last_error = self.config_error
             elif self._state == "starting":
                 state = "syncing"
             elif self._state == "ok":
@@ -523,7 +532,7 @@ class Store:
                 "pending": n,
                 "last_sync": self._last_sync,
                 "last_push": self._last_push,
-                "last_error": self._last_error,
+                "last_error": last_error,
                 "repo": self.repo,
                 "branch": self.branch,
                 "path": self.path,

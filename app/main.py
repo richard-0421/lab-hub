@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import calendar_feed, migrate
-from .config import BASE_DIR, github_enabled, load_config
+from .config import BASE_DIR, github_config_error, github_enabled, load_config
 from .github_sync import SyncWorker
 from .store import OpError, Store, StoreUnavailable
 
@@ -302,7 +302,9 @@ def _setup_logging():
 
 def _file_url(cfg):
     repo = cfg.get("github_repo")
-    if not repo:
+    if not repo or github_config_error(cfg):
+        # an unusable branch or path (e.g. "a/../b") would point the link at
+        # some other github.com page
         return ""
     return "https://github.com/%s/blob/%s/%s" % (repo, cfg.get("github_branch"), cfg.get("github_path"))
 
@@ -321,6 +323,9 @@ def public_config(cfg):
             "path": cfg["github_path"],
             "pages_url": cfg["pages_url"],
             "file_url": _file_url(cfg),
+            # why GitHub sync is off despite a configured repo, e.g.
+            # "config: github_branch 'x..y' is not a valid branch name"
+            "last_error": github_config_error(cfg) or None,
         },
         "calendar": {"configured": bool(cfg["calendar_ics"])},
     }
@@ -349,6 +354,7 @@ def create_app(cfg=None, static_dir=None, repo_dir=None):
             path=cfg["github_path"],
             api=cfg["github_api"],
             client_name=cfg["client_name"],
+            config_error=github_config_error(cfg),
         )
         try:
             migrate.run_migration(cfg, store)

@@ -60,9 +60,9 @@ class ServerThread(object):
 
     def start(self):
         self.thread.start()
-        end = time.time() + 15
+        end = time.monotonic() + 15
         while not self.server.started:
-            if time.time() > end or not self.thread.is_alive():
+            if time.monotonic() > end or not self.thread.is_alive():
                 raise RuntimeError("uvicorn did not start")
             time.sleep(0.02)
         return self
@@ -94,8 +94,10 @@ def get_json(url):
 
 
 def wait_until(pred, timeout=8.0, step=0.05):
-    end = time.time() + timeout
-    while time.time() < end:
+    # monotonic: a wall-clock jump (e.g. the Mac waking from sleep mid-test)
+    # must not end the wait early
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if pred():
             return True
         time.sleep(step)
@@ -218,6 +220,7 @@ class LocalApiTests(_ApiBase):
         _, _, body = get_json(self.base + "/api/sync")
         self.assertEqual(body["state"], "off")
         self.assertFalse(body["enabled"])
+        self.assertIsNone(body["last_error"])  # no token is not an error
         status, _, data = http("POST", self.base + "/api/sync")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(data)["state"], "off")
@@ -375,13 +378,22 @@ class BadGitHubConfigApiTests(_ApiBase):
 
     def test_config_error_is_reported(self):
         _, _, body = get_json(self.base + "/api/config")
-        if "last_error" not in body["github"]:
-            self.skipTest("app/main.py does not report github_config_error() yet")
         self.assertEqual(body["github"]["last_error"], self.ERROR)
         self.assertIs(body["github"]["enabled"], False)
+        self.assertEqual(body["github"]["file_url"], "")  # never a link built from an unusable branch/path
         _, _, sync = get_json(self.base + "/api/sync")
         self.assertEqual(sync["state"], "off")
+        self.assertIs(sync["enabled"], False)
         self.assertEqual(sync["last_error"], self.ERROR)
+        _, _, board = get_json(self.base + "/api/board")
+        self.assertEqual(board["sync"]["last_error"], self.ERROR)
+        status, _, data = http("POST", self.base + "/api/sync")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)["last_error"], self.ERROR)
+        # not persisted: sync.json never holds it, so fixing the config clears it
+        with open(os.path.join(self.cfg["state_dir"], "sync.json"), encoding="utf-8") as f:
+            self.assertIsNone(json.load(f)["last_error"])
+        self.assertNotIn(SECRET, json.dumps([body, sync, board]))
 
 
 class GitHubApiTests(_ApiBase):
@@ -592,6 +604,33 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(github_enabled(cfg))
             warn.assert_not_called()
         self.assertEqual(self.load(dict(good, github_path="/board.json/"))["github_path"], "board.json")
+
+    def test_public_config_reports_the_config_error(self):
+        good = {"github_repo": "richard-0417/lab-hub", "github_token": SECRET}
+        gh = app_main.public_config(self.load(good))["github"]
+        self.assertIsNone(gh["last_error"])
+        self.assertEqual(gh["file_url"], "https://github.com/richard-0417/lab-hub/blob/data/board.json")
+        self.assertIs(gh["enabled"], True)
+        cases = {
+            "github_path": ("a/../board.json", "config: github_path 'a/../board.json' is not a valid file path"),
+            "github_branch": ("x..y", "config: github_branch 'x..y' is not a valid branch name"),
+            "github_repo": ("richard-0417/..", "config: github_repo 'richard-0417/..' is not a valid repository "
+                                               "(use owner/name, e.g. richard-0417/lab-hub)"),
+        }
+        for key, (value, message) in cases.items():
+            with self.assertLogs("labhub.config", level="WARNING"):
+                cfg = self.load(dict(good, **{key: value}))
+            body = app_main.public_config(cfg)
+            gh = body["github"]
+            self.assertEqual(gh["last_error"], message, key)
+            self.assertIs(gh["enabled"], False, key)
+            self.assertEqual(gh["file_url"], "", key)  # never a link built from an unusable value
+            self.assertNotIn(SECRET, json.dumps(body))
+        # without a token sync is off too, but that is not a config error
+        gh = app_main.public_config(self.load({"github_repo": "richard-0417/lab-hub"}))["github"]
+        self.assertIsNone(gh["last_error"])
+        self.assertTrue(gh["file_url"])
+        self.assertIsNone(app_main.public_config(self.load({}))["github"]["last_error"])
 
     def write_git(self, origin, gitfile=False):
         git = os.path.join(self.tmp, "real.git" if gitfile else ".git")

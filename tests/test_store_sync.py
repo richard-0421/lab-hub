@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -18,7 +19,7 @@ if ROOT not in sys.path:
 
 from app import board as B  # noqa: E402
 from app import store as S  # noqa: E402
-from app.github_sync import SyncWorker, git_blob_sha  # noqa: E402
+from app.github_sync import GitHubClient, SyncWorker, git_blob_sha  # noqa: E402
 from app.store import OpError, Store, StoreUnavailable  # noqa: E402
 from tests.mock_github import MockGitHub  # noqa: E402
 
@@ -66,8 +67,9 @@ def failing_writes(*names):
 
 
 def wait_until(pred, timeout=5.0, step=0.02):
-    end = time.time() + timeout
-    while time.time() < end:
+    # monotonic: a wall-clock jump (e.g. waking from sleep) must not end the wait early
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if pred():
             return True
         time.sleep(step)
@@ -105,6 +107,31 @@ class StoreTests(TempDirTest):
         s2 = self.local_store()
         self.assertEqual(titles(s2.view()), ["Order tips"])
         self.assertEqual(s2.pending(), [])
+
+    def test_config_error_is_shown_while_off_and_never_persisted(self):
+        msg = "config: github_branch 'x..y' is not a valid branch name"
+        # an error recorded while sync was on (same target) ...
+        g = self.gh_store()
+        g.set_error("GitHub token rejected (expired or revoked?)")
+        self.assertEqual(g.sync_status()["last_error"], "GitHub token rejected (expired or revoked?)")
+        # ... is stale once sync is off; only the config problem is reported
+        s = Store(self.state, github_enabled=False, repo=REPO, branch="data", path="board.json",
+                  api="http://127.0.0.1:9", config_error=msg)
+        for status in (s.sync_status(), s.board_response()["sync"], s.submit([add_task("t-1", "A")])["sync"]):
+            self.assertEqual(status["state"], "off")
+            self.assertIs(status["enabled"], False)
+            self.assertEqual(status["last_error"], msg)
+        with open(os.path.join(self.state, "sync.json"), encoding="utf-8") as f:
+            self.assertNotIn(msg, f.read())
+        # config fixed but still no token: off, and nothing to report
+        s = Store(self.state, github_enabled=False, repo=REPO, branch="data", path="board.json",
+                  api="http://127.0.0.1:9")
+        self.assertIsNone(s.sync_status()["last_error"])
+        self.assertIsNone(self.local_store().sync_status()["last_error"])
+        # sync on: the config error (if a caller passed one) never masks the real state
+        g = Store(self.state, github_enabled=True, repo=REPO, branch="data", path="board.json",
+                  api="http://127.0.0.1:9", config_error=msg)
+        self.assertNotEqual(g.sync_status()["last_error"], msg)
 
     def test_github_mode_queue_persists(self):
         s = self.gh_store()
@@ -495,16 +522,153 @@ class SyncTests(TempDirTest):
         self.assertEqual(self.remote()["tasks"], [])
         self.assertEqual(self.mock.commits("data")[-1]["message"], "lab-pi: create board.json")
 
-    def test_branch_is_created_when_missing(self):
+    def history(self, branch):
+        """Every commit reachable from ``branch`` (newest first)."""
+        out, sha = [], self.mock.head(branch)["sha"]
+        while sha:
+            c = self.mock.commit(sha)
+            out.append(c)
+            self.assertLessEqual(len(c["parents"]), 1)
+            sha = c["parents"][0] if c["parents"] else None
+        return out
+
+    def posted(self, path_end):
+        return [json.loads(r["body"]) for r in self.mock.requests if r["method"] == "POST" and r["path"].endswith(path_end)]
+
+    def test_missing_branch_is_created_as_an_orphan(self):
         store, worker = self.start(create_data_branch=False)
         self.assertNotIn("data", self.mock.branches)
+        main_head = self.mock.head("main")
         store.submit([add_task("t-1", "A")])
+        self.mock.clear_log()
         status = worker.sync_once()
         self.assertEqual(status["state"], "ok", status)
-        self.assertIn("data", self.mock.branches)
-        self.assertEqual(self.mock.count("POST", "/git/refs", 201), 1)
+        self.assertEqual(status["pending"], 0)
+        self.assertIsNone(status["last_error"])
+        calls = [(r["method"], r["path"].split("/lab-hub", 1)[1] or "/", r["status"]) for r in self.mock.requests]
+        self.assertEqual(calls, [
+            ("GET", "/contents/board.json", 404),
+            ("GET", "/", 200),
+            ("PUT", "/contents/board.json", 404),      # Branch data not found
+            ("POST", "/git/trees", 201),
+            ("POST", "/git/commits", 201),
+            ("POST", "/git/refs", 201),
+            ("GET", "/contents/board.json", 200),      # the normal cycle on the new branch
+            ("PUT", "/contents/board.json", 200),
+        ])
+        # the tree holds only board.json (no base_tree), the commit has no parents
+        (tree_req,) = self.posted("/git/trees")
+        self.assertEqual(set(tree_req), {"tree"})
+        self.assertEqual([{k: v for k, v in e.items() if k != "content"} for e in tree_req["tree"]],
+                         [{"path": "board.json", "mode": "100644", "type": "blob"}])
+        (commit_req,) = self.posted("/git/commits")
+        self.assertEqual(commit_req["parents"], [])
+        (ref_req,) = self.posted("/git/refs")
+        self.assertEqual(ref_req["ref"], "refs/heads/data")
+
+        history = self.history("data")
+        self.assertEqual(len(history), 2)
+        head, root = history
+        self.assertEqual(ref_req["sha"], root["sha"])
+        self.assertEqual(commit_req["tree"], root["tree"])
+        self.assertEqual(root["parents"], [])
+        self.assertEqual(sorted(root["files"]), ["board.json"])   # no README.md, no code
+        self.assertEqual(root["message"].split("\n")[0], "lab-pi: create board.json")
+        first = B.parse_json_strict(root["files"]["board.json"].decode("utf-8"))
+        self.assertEqual(first, B.normalize_board(first))           # canonical, needs no clean-up commit
+        self.assertEqual([first[c] for c in B.COLLECTIONS], [[], [], []])
+        self.assertEqual(first["updated_by"], "lab-pi")
+        # then the queued op went in the normal way: PUT with the root's blob sha
+        put = json.loads(self.puts()[-1]["body"])
+        self.assertEqual(put["sha"], git_blob_sha(root["files"]["board.json"]))
+        self.assertEqual(head["parents"], [root["sha"]])
+        self.assertEqual(sorted(head["files"]), ["board.json"])
         self.assertEqual(titles(self.remote()), ["A"])
+        self.assertEqual(store.view(), B.normalize_board(self.remote()))
+        # main is untouched and shares no history with data
+        self.assertEqual(self.mock.head("main")["sha"], main_head["sha"])
         self.assertIsNone(self.mock.get_file_text("main", "board.json"))
+        self.assertNotIn(main_head["sha"], [c["sha"] for c in history])
+
+        # from now on it is a plain sync
+        store.submit([add_task("t-2", "B", 1)])
+        self.mock.clear_log()
+        self.assertEqual(worker.sync_once()["state"], "ok")
+        self.assertEqual(titles(self.remote()), ["A", "B"])
+        self.assertEqual(self.mock.count("POST"), 0)
+        self.assertEqual(len(self.history("data")), 3)
+        self.assertEqual(worker.sync_once()["pending"], 0)
+
+    def test_missing_branch_without_queued_ops_is_one_orphan_commit(self):
+        store, worker = self.start(create_data_branch=False)
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "ok", status)
+        (root,) = self.history("data")
+        self.assertEqual(root["parents"], [])
+        self.assertEqual(sorted(root["files"]), ["board.json"])
+        self.assertEqual(B.normalize_board(self.remote()), store.view())
+        self.assertEqual(self.mock.count("PUT", status=200) + self.mock.count("PUT", status=201), 0)
+        self.assertEqual(worker.sync_once()["state"], "ok")
+        self.assertEqual(len(self.history("data")), 1)
+
+    def test_empty_repo_asks_for_the_code_first(self):
+        store, worker = self.start(empty=True)
+        store.submit([add_task("t-1", "A")])
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(status["last_error"], "the GitHub repo has no commits yet - push the Lab Hub code to "
+                                               "it first, then the 'data' branch is created on the next sync")
+        self.assertEqual(status["pending"], 1)
+        self.assertEqual(self.mock.count("POST", "/git/trees", 409), 1)
+        self.assertEqual(self.mock.count("POST", "/git/refs"), 0)
+        self.assertEqual(self.mock.branches, {})
+        # the owner pushes the code: the next sync creates the orphan branch
+        self.mock.set_file_text("main", "README.md", "# lab-hub\n", "Initial commit")
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "ok", status)
+        self.assertEqual(titles(self.remote()), ["A"])
+        root = self.history("data")[-1]
+        self.assertEqual((root["parents"], sorted(root["files"])), ([], ["board.json"]))
+        self.assertEqual(sorted(self.mock.branches["main"]["files"]), ["README.md"])
+
+    def test_branch_created_by_someone_else_meanwhile(self):
+        store, worker = self.start(create_data_branch=False)
+        web = json.dumps({"tasks": [{"id": "t-w", "title": "Web"}]})
+        # a browser creates the branch between our 404 and our POST git/refs
+        self.mock.on_next("POST", lambda: self.mock.set_file_text("data", "board.json", web), "/git/refs")
+        store.submit([add_task("t-l", "Local")])
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "ok", status)
+        self.assertEqual(self.mock.count("POST", "/git/refs", 422), 1)
+        self.assertEqual(titles(self.remote()), ["Local", "Web"])
+
+    def test_lost_ref_answer_is_picked_up_next_cycle(self):
+        store, worker = self.start(create_data_branch=False)
+        self.mock.drop_response_next("POST", "/git/refs")
+        store.submit([add_task("t-1", "A")])
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "offline")
+        self.assertIn("data", self.mock.branches)  # it was created; only the answer was lost
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "ok", status)
+        self.assertEqual(self.mock.count("POST", "/git/refs"), 1)
+        self.assertEqual(titles(self.remote()), ["A"])
+        self.assertEqual(len(self.history("data")), 2)
+
+    def test_new_branch_not_visible_yet_is_retried(self):
+        store, worker = self.start(create_data_branch=False)
+        store.submit([add_task("t-1", "A")])
+        # GitHub's replicas lag: the PUT right after creating the branch still misses it
+        self.mock.on_next("POST", lambda: self.mock.fail_next(404, "Branch data not found", method="PUT"),
+                          "/git/refs")
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(status["last_error"], "the new 'data' branch is not visible on GitHub yet; will retry shortly")
+        self.assertEqual(status["pending"], 1)
+        status = worker.sync_once()
+        self.assertEqual(status["state"], "ok", status)
+        self.assertEqual(self.mock.count("POST", "/git/refs"), 1)
+        self.assertEqual(titles(self.remote()), ["A"])
 
     def test_two_way_merge(self):
         store, worker = self.start()
@@ -947,6 +1111,133 @@ class SyncTests(TempDirTest):
             worker.sync_once()
         self.assertTrue(any("more than 2000 items in tasks" in m for m in logs.output), logs.output)
         self.assertEqual(len(store.view()["tasks"]), B.MAX_ITEMS)
+
+
+# --------------------------------------------------------------------------- #
+# the mock's Git database API (the orphan-branch path depends on its fidelity)
+# --------------------------------------------------------------------------- #
+class MockGitDatabaseTests(unittest.TestCase):
+    def setUp(self):
+        self.mock = None
+        self.tmp = tempfile.mkdtemp(prefix="labhub-git-")
+
+    def tearDown(self):
+        if self.mock is not None:
+            self.mock.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def start(self, **kw):
+        self.mock = MockGitHub(repo=REPO, token=TOKEN, **kw).start()
+        self.client = GitHubClient(self.mock.url, REPO, TOKEN)
+        return self.mock
+
+    def call(self, method, path, body=None):
+        status, _, data = self.client.request(method, self.client._repo_path(path), body=body)
+        return status, json.loads(data.decode("utf-8"))
+
+    def git_tree_sha(self, files):
+        """The tree id real git computes for {path: bytes} (skipped without git)."""
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        repo = os.path.join(self.tmp, "repo-%d" % len(os.listdir(self.tmp)))
+        os.makedirs(repo)
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        subprocess.run(["git", "init", "-q", repo], check=True, env=env)
+        for path, data in files.items():
+            full = os.path.join(repo, *path.split("/"))
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as f:
+                f.write(data)
+        subprocess.run(["git", "-C", repo, "add", "-A"], check=True, env=env)
+        out = subprocess.run(["git", "-C", repo, "write-tree"], check=True, env=env, stdout=subprocess.PIPE)
+        return out.stdout.decode("ascii").strip()
+
+    def test_orphan_commit_and_ref(self):
+        mock = self.start(create_data_branch=False)
+        text = B.serialize_board(B.empty_board())
+        status, tree = self.call("POST", "/git/trees", {"tree": [
+            {"path": "board.json", "mode": "100644", "type": "blob", "content": text}]})
+        self.assertEqual(status, 201)
+        self.assertEqual(set(tree), {"sha", "url", "tree", "truncated"})
+        self.assertEqual(tree["sha"], self.git_tree_sha({"board.json": text.encode("utf-8")}))
+        (entry,) = tree["tree"]
+        self.assertEqual({k: entry[k] for k in ("path", "mode", "type", "sha", "size")},
+                         {"path": "board.json", "mode": "100644", "type": "blob",
+                          "sha": git_blob_sha(text.encode("utf-8")), "size": len(text.encode("utf-8"))})
+
+        status, commit = self.call("POST", "/git/commits", {"message": "lab-pi: create board.json",
+                                                            "tree": tree["sha"], "parents": []})
+        self.assertEqual(status, 201)
+        self.assertEqual(commit["parents"], [])
+        self.assertEqual(commit["tree"]["sha"], tree["sha"])
+        self.assertEqual(commit["message"], "lab-pi: create board.json")
+        for key in ("sha", "node_id", "url", "html_url", "author", "committer", "verification"):
+            self.assertIn(key, commit)
+        self.assertNotIn("data", mock.branches)  # a commit alone is not a branch
+
+        status, ref = self.call("POST", "/git/refs", {"ref": "refs/heads/data", "sha": commit["sha"]})
+        self.assertEqual(status, 201)
+        self.assertEqual((ref["ref"], ref["object"]["sha"], ref["object"]["type"]),
+                         ("refs/heads/data", commit["sha"], "commit"))
+        self.assertEqual(self.client.get_file("board.json", "data").data, text.encode("utf-8"))
+        self.assertEqual(self.client.list_commits("data", "board.json"), [commit["sha"]])
+        self.assertEqual(mock.commits("data")[0]["sha"], commit["sha"])
+        status, err = self.call("POST", "/git/refs", {"ref": "refs/heads/data", "sha": commit["sha"]})
+        self.assertEqual((status, err["message"]), (422, "Reference already exists"))
+        # a child commit through the Contents API keeps the history linear
+        res = self.client.put_file("board.json", "data", b"{}\n", "edit", git_blob_sha(text.encode("utf-8")))
+        self.assertEqual(mock.head("data")["parents"], [commit["sha"]])
+        self.assertEqual(self.client.list_commits("data", "board.json"), [res["commit"]["sha"], commit["sha"]])
+
+    def test_blobs_trees_and_errors(self):
+        mock = self.start()
+        status, blob = self.call("POST", "/git/blobs", {"content": "lab-hub write-access check\n", "encoding": "utf-8"})
+        self.assertEqual(status, 201)
+        self.assertEqual(blob["sha"], git_blob_sha(b"lab-hub write-access check\n"))
+        status, blob64 = self.call("POST", "/git/blobs", {"content": "aGk=", "encoding": "base64"})
+        self.assertEqual((status, blob64["sha"]), (201, git_blob_sha(b"hi")))
+        self.assertEqual(self.client.get_blob(blob64["sha"]), b"hi")
+
+        # nested paths, sha entries, base_tree with a deletion: real git tree ids
+        status, t1 = self.call("POST", "/git/trees", {"tree": [
+            {"path": "b/x.json", "mode": "100644", "type": "blob", "content": "1"},
+            {"path": "b.txt", "mode": "100644", "type": "blob", "sha": blob64["sha"]},
+            {"path": "a", "mode": "100644", "type": "blob", "content": "2"}]})
+        self.assertEqual(status, 201)
+        self.assertEqual(t1["sha"], self.git_tree_sha({"b/x.json": b"1", "b.txt": b"hi", "a": b"2"}))
+        self.assertEqual([(e["path"], e["type"]) for e in t1["tree"]], [("a", "blob"), ("b.txt", "blob"), ("b", "tree")])
+        status, t2 = self.call("POST", "/git/trees", {"base_tree": t1["sha"], "tree": [
+            {"path": "a", "mode": "100644", "type": "blob", "sha": None}]})
+        self.assertEqual(status, 201)
+        self.assertEqual(t2["sha"], self.git_tree_sha({"b/x.json": b"1", "b.txt": b"hi"}))
+
+        for body in ({"tree": [{"path": "../x", "mode": "100644", "type": "blob", "content": "x"}]},
+                     {"tree": [{"path": "x", "mode": "100644", "type": "blob", "sha": "0" * 40}]},
+                     {"tree": [{"path": "x", "mode": "100644", "type": "tree", "content": "x"}]},
+                     {"tree": [{"path": "x", "mode": "100644", "type": "blob"}]},
+                     {"tree": "nope"}, {"base_tree": "0" * 40, "tree": []}):
+            self.assertEqual(self.call("POST", "/git/trees", body)[0], 422, body)
+        status, err = self.call("POST", "/git/commits", {"message": "m", "tree": t1["sha"], "parents": ["0" * 40]})
+        self.assertEqual((status, err["message"]), (422, "Parent SHA does not exist or is not a commit object"))
+        self.assertEqual(self.call("POST", "/git/commits", {"message": "m", "tree": "0" * 40})[0], 422)
+        self.assertEqual(self.call("POST", "/git/refs", {"ref": "refs/heads/x", "sha": "0" * 40})[0], 422)
+        # writes need the token
+        anon = GitHubClient(mock.url, REPO, "")
+        status, _, _ = anon.request("POST", anon._repo_path("/git/trees"), body={"tree": []})
+        self.assertEqual(status, 401)
+
+    def test_empty_repo(self):
+        mock = self.start(empty=True)
+        self.assertEqual(self.call("GET", "")[0], 200)
+        status, err = self.call("GET", "/contents/board.json?ref=data")
+        self.assertEqual((status, err["message"]), (404, "This repository is empty."))
+        for path, body in (("/git/blobs", {"content": "x"}), ("/git/refs", {"ref": "refs/heads/data", "sha": "0" * 40}),
+                           ("/git/trees", {"tree": []}),
+                           ("/git/commits", {"message": "m", "tree": "4b825dc642cb6eb9a060e54bf8d69288fbee4904"})):
+            status, err = self.call("POST", path, body)
+            self.assertEqual((status, err["message"]), (409, "Git Repository is empty."), path)
+        self.assertEqual(self.call("GET", "/commits?sha=data")[0], 409)
+        self.assertEqual(mock.branches, {})
 
 
 if __name__ == "__main__":

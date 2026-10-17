@@ -42,8 +42,9 @@ export function forgetGitHub({ source = null, unsubscribe = null, clear, reload 
 
 /**
  * Ops this page holds only in memory (LocalSource's outbox): a reload would
- * lose them. GitHubSource persists its queue, so it reports 0 here. Prefers a
- * public `unsent` count and falls back to the outbox length.
+ * lose them. GitHubSource persists its queue, so it reports 0 here. Prefers
+ * LocalSource's public `unsent` count and falls back to the outbox length
+ * (older sources).
  */
 export function unsentOps(source) {
   if (!source || source.mode !== "local") return 0;
@@ -83,6 +84,28 @@ export function versionReloadBlocker({
   if (focusedDraft) return "draft";
   if (idle < RECENT_INPUT_MS) return "active";
   return "";
+}
+
+/**
+ * The kiosk's go / no-go for a version reload, with a last push first.
+ *   state() -> the versionReloadBlocker() fields except `unsent`; it is read
+ *              again after the push, so `now` and input times are fresh.
+ * When nothing but (possibly) unsent edits stands in the way and the source
+ * can push on demand (LocalSource.flush(), which never rejects), the outbox is
+ * pushed now and the blocker checked again — instead of waiting for the next
+ * 3 s poll, and so nothing typed during the push is lost. Resolves to the
+ * blocker ("" = reload now).
+ */
+export async function versionReloadCheck(source, state) {
+  const look = () => versionReloadBlocker(Object.assign({}, typeof state === "function" ? state() : state, { unsent: unsentOps(source) }));
+  const why = look();
+  if ((why !== "" && why !== "unsent") || !source || typeof source.flush !== "function") return why;
+  try {
+    await source.flush();
+  } catch (_) {
+    // flush() never rejects; if a source's does, the re-check still decides
+  }
+  return look();
 }
 
 /** True when `el` is a text field / textarea / contenteditable with text in it. */

@@ -11,12 +11,12 @@ export function initToasts(el) {
 }
 
 /**
- * toast({message, kind: "info"|"success"|"error", action: {label, run}, timeout})
+ * toast({message, kind: "info"|"success"|"warn"|"error", action: {label, run}, timeout})
  * -> {dismiss()}
  */
 export function toast({ message, kind = "info", action = null, timeout } = {}) {
   if (!region) return { dismiss() {} };
-  const ms = timeout != null ? timeout : kind === "error" ? 9000 : 6000;
+  const ms = timeout != null ? timeout : kind === "error" || kind === "warn" ? 9000 : 6000;
   let timer = null;
   let left = ms;
   let started = 0;
@@ -42,7 +42,7 @@ export function toast({ message, kind = "info", action = null, timeout } = {}) {
     left = Math.max(1500, left - (Date.now() - started));
   };
 
-  const ico = kind === "error" ? "alert" : kind === "success" ? "check" : "sparkle";
+  const ico = kind === "error" || kind === "warn" ? "alert" : kind === "success" ? "check" : "sparkle";
   const el = h(
     "div",
     { class: `toast toast-${kind}`, role: kind === "error" ? "alert" : "status" },

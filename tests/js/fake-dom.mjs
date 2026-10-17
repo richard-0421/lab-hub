@@ -34,6 +34,16 @@ class Node {
     this.childNodes = [];
     this._listeners = new Map();
   }
+  // A short label in assertion messages. The default inspect walks the whole
+  // fake document (parents, listeners), and a failing assert.equal on two
+  // nodes then spends minutes and gigabytes building its diff.
+  [Symbol.for("nodejs.util.inspect.custom")]() {
+    if (this.nodeType === 3) return `#text ${JSON.stringify(String(this.data).slice(0, 40))}`;
+    if (this.nodeType !== 1) return "#document";
+    const id = this.id ? `#${this.id}` : "";
+    const cls = this.className ? `.${this.className.trim().split(/\s+/).join(".")}` : "";
+    return `<${this.tagName.toLowerCase()}${id}${cls}>`;
+  }
   get firstChild() {
     return this.childNodes[0] || null;
   }

@@ -2812,6 +2812,15 @@ dialog.dlg::backdrop {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.fld input[aria-invalid="true"] {
+  border-color: var(--danger-line);
+}
+
+.fld input[aria-invalid="true"]:focus {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px var(--err-bg);
+}
+
 .fld input:disabled,
 .fld textarea:disabled {
   opacity: 0.85;
@@ -3155,6 +3164,19 @@ dialog.dlg.setup {
   font-weight: 650;
 }
 
+.token-help .fld-hint {
+  align-items: flex-start;
+  line-height: 1.45;
+}
+
+.token-help .fld-hint .icon {
+  margin-top: 0.15rem;
+}
+
+.token-repo {
+  overflow-wrap: anywhere;
+}
+
 .token-link {
   display: inline-flex;
   align-items: center;
@@ -3232,6 +3254,11 @@ dialog.dlg.setup {
   color: var(--ok);
 }
 
+.setup-warnings > div {
+  display: grid;
+  gap: 0.35rem;
+}
+
 /* ================================================================== toasts */
 .toasts {
   position: fixed;
@@ -3303,6 +3330,14 @@ html[data-theme="light"] .toast-success .toast-ico {
 
 html[data-theme="light"] .toast-error .toast-ico {
   color: #ff8a8a;
+}
+
+.toast-warn .toast-ico {
+  color: var(--warn);
+}
+
+html[data-theme="light"] .toast-warn .toast-ico {
+  color: #f5b544;
 }
 
 .toast-msg {

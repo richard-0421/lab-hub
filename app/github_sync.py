@@ -13,6 +13,10 @@ ours -> the push landed; it is still the parent -> it did not; otherwise the
 file's recent history tells. Only a push that did not land is sent again, so
 an old push is never replayed over edits other people made since.
 
+A missing board branch is created as an orphan (git/trees + git/commits with
+no parents + git/refs): a root commit holding only the board file, never a
+copy of the default branch, so the code on main never ends up in "data".
+
 The token lives only in this module's
 request headers; it is never logged, never put in an error message and never
 returned to browsers.
@@ -35,6 +39,7 @@ from .board import (
     apply_ops,
     canonical_timestamp,
     clean_text,
+    empty_board,
     normalize_board,
     now_iso,
     parse_json_strict,
@@ -252,19 +257,6 @@ class GitHubClient(object):
             self._raise(status, headers, data)
         return self._json(data)
 
-    def get_ref(self, branch):
-        status, headers, data = self.request(
-            "GET", self._repo_path("/git/ref/heads/" + urllib.parse.quote(branch, safe="/"))
-        )
-        if status != 200:
-            self._raise(status, headers, data)
-        info = self._json(data)
-        obj = info.get("object") if isinstance(info, dict) else None
-        sha = obj.get("sha") if isinstance(obj, dict) else None
-        if not isinstance(sha, str):
-            raise GitHubError(status, "unexpected ref response for %s" % branch)
-        return sha
-
     def create_ref(self, branch, sha):
         status, headers, data = self.request(
             "POST", self._repo_path("/git/refs"), body={"ref": "refs/heads/" + branch, "sha": sha}
@@ -272,6 +264,33 @@ class GitHubClient(object):
         if status not in (200, 201):
             self._raise(status, headers, data)
         return self._json(data)
+
+    def _created_sha(self, what, path, body):
+        """POST a git object and return its sha (GitHub answers 201)."""
+        status, headers, data = self.request("POST", self._repo_path(path), body=body)
+        if status not in (200, 201):
+            self._raise(status, headers, data)
+        info = self._json(data)
+        sha = info.get("sha") if isinstance(info, dict) else None
+        if not isinstance(sha, str) or not sha:
+            raise GitHubError(status, "unexpected %s response" % what)
+        return sha
+
+    def create_tree(self, files):
+        """A tree holding exactly ``files`` ({path: bytes}, valid UTF-8): no
+        ``base_tree``, so nothing else is in it. Returns the tree sha."""
+        entries = [
+            {"path": path, "mode": "100644", "type": "blob", "content": data.decode("utf-8")}
+            for path, data in sorted(files.items())
+        ]
+        return self._created_sha("tree", "/git/trees", {"tree": entries})
+
+    def create_commit(self, message, tree, parents=()):
+        """A commit of ``tree``; ``parents=()`` makes a root (orphan) commit.
+        Returns the commit sha."""
+        return self._created_sha(
+            "commit", "/git/commits", {"message": message, "tree": tree, "parents": list(parents)}
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -473,24 +492,32 @@ class SyncWorker(object):
         return False
 
     def _create_branch(self):
+        """Create the missing board branch as an ORPHAN: one root commit
+        whose tree holds only the board file (an empty board). The branch
+        shares no history with the code on main, so the Pi never copies the
+        code into it, and the board's commits stay out of the code history.
+        The caller then runs the normal cycle on it (fetch, replay, PUT)."""
         client = self.client
-        info = client.get_repo()
-        default = info.get("default_branch") or "main"
+        doc = empty_board()
+        doc["updated_at"] = now_iso()
+        doc["updated_by"] = clean_text(self.client_name, 60)
+        message = "%s: create %s\n\nNew orphan branch '%s' holding only %s (no code history)." % (
+            self.client_name, self.path, self.branch, self.path)
         try:
-            sha = client.get_ref(default)
+            tree = client.create_tree({self.path: serialize_board_bytes(doc)})
+            commit = client.create_commit(message, tree, parents=())
+            client.create_ref(self.branch, commit)
+            log.info("created orphan branch %s holding only %s", self.branch, self.path)
         except GitHubError as exc:
-            if exc.status in (404, 409):
+            if exc.status == 422 and "already exists" in exc.message.lower():
+                return  # someone else created it meanwhile: sync with theirs
+            if exc.status == 409:
+                # the Git database API answers 409 "Git Repository is empty."
                 raise SyncError(
-                    "the GitHub repo has no commits yet - push the Lab Hub code to it first "
-                    "(the '%s' branch is created from '%s')" % (self.branch, default)
+                    "the GitHub repo has no commits yet - push the Lab Hub code to it first, "
+                    "then the '%s' branch is created on the next sync" % self.branch
                 )
             raise
-        try:
-            client.create_ref(self.branch, sha)
-            log.info("created branch %s from %s", self.branch, default)
-        except GitHubError as exc:
-            if not (exc.status == 422 and "already exists" in exc.message.lower()):
-                raise
 
     def _cycle(self):
         store = self.store
@@ -537,7 +564,10 @@ class SyncWorker(object):
                 if _is_branch_missing(exc) and not branch_created:
                     self._create_branch()
                     branch_created = True
-                    continue
+                    continue  # the file exists now: fetch it, replay, PUT with its sha
+                if _is_branch_missing(exc):
+                    raise SyncError("the new '%s' branch is not visible on GitHub yet; will retry shortly"
+                                    % self.branch)
                 if _is_sha_conflict(exc) and conflicts < MAX_CONFLICT_RETRIES - 1:
                     conflicts += 1
                     log.info("board.json changed on GitHub during the push; rebasing (retry %d)", conflicts)

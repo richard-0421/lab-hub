@@ -18,12 +18,22 @@ import {
   personName,
   unsentOps,
   versionReloadBlocker,
+  versionReloadCheck,
 } from "../../static/js/ui/lifecycle.js";
 import { DIALOG_KEY_GUARD_MS, cardKeyAction, keyArm, leaveStatusSet } from "../../static/js/ui/tasks.js";
 import { resolveDropIndex } from "../../static/js/ui/dnd.js";
 import { taskUpdateSet } from "../../static/js/ui/task-editor.js";
 import { calendarEntries } from "../../static/js/ui/calendar.js";
-import { readOnlyConfirm, openSetup } from "../../static/js/ui/setup.js";
+import {
+  TRUST_NOTE,
+  boardIsCodeRepo,
+  connectDecision,
+  invalidField,
+  openSetup,
+  readOnlyConfirm,
+  sentence,
+  tokenStorageNote,
+} from "../../static/js/ui/setup.js";
 import { initRequests } from "../../static/js/ui/requests.js";
 import { initNotes } from "../../static/js/ui/notes.js";
 import { initHeader } from "../../static/js/ui/header.js";
@@ -89,10 +99,20 @@ describe("versionReloadBlocker (kiosk auto-update)", () => {
 
   test("unsentOps counts only LocalSource's in-memory outbox", () => {
     assert.equal(unsentOps(null), 0);
-    assert.equal(unsentOps({ mode: "local", _outbox: [1, 2] }), 2);
+    assert.equal(unsentOps({ mode: "local", _outbox: [1, 2] }), 2); // fallback: no public count
     assert.equal(unsentOps({ mode: "local", unsent: 3, _outbox: [] }), 3);
+    assert.equal(unsentOps({ mode: "local", unsent: 0, _outbox: [1] }), 0, "the public count wins");
     assert.equal(unsentOps({ mode: "github", _pending: [1], sync: { pending: 1 } }), 0); // persisted
     assert.equal(unsentOps({ mode: "local" }), 0);
+  });
+
+  test("unsentOps reads LocalSource's real `unsent` getter", async () => {
+    const { LocalSource } = await import("../../static/js/sources.js");
+    const src = new LocalSource({ clientName: "kiosk" });
+    assert.equal(unsentOps(src), 0);
+    src._outbox.push({ op: "add" });
+    assert.equal(src.unsent, 1);
+    assert.equal(unsentOps(src), 1);
   });
 
   test("hasDraft: only text fields with text in them", () => {
@@ -105,6 +125,75 @@ describe("versionReloadBlocker (kiosk auto-update)", () => {
     assert.equal(hasDraft(el("SELECT", null, "manual")), false);
     assert.equal(hasDraft(el("INPUT", "checkbox", "on")), false);
     assert.equal(hasDraft(null), false);
+  });
+});
+
+// ------------------------------------------------- flush before version reload
+describe("versionReloadCheck (push unsent kiosk edits before reloading)", () => {
+  const now = 10_000_000;
+  const idle = now - RECENT_INPUT_MS - 1;
+  const quiet = () => ({ now, pendingSince: now, lastInputAt: idle });
+  // A LocalSource stand-in: `unsent` drops to `left` once flush() resolves.
+  const source = (unsent, { left = 0, fails = false } = {}) => {
+    const src = { mode: "local", unsent, flushes: 0 };
+    src.flush = async () => {
+      src.flushes++;
+      await tick();
+      if (fails) throw new Error("boom");
+      src.unsent = left;
+      return { state: "ok" };
+    };
+    return src;
+  };
+
+  test("unsent edits are flushed, then the blocker is checked again: reload", async () => {
+    const src = source(2);
+    assert.equal(await versionReloadCheck(src, quiet), "");
+    assert.equal(src.flushes, 1);
+  });
+
+  test("still unsent after the flush (Pi busy or unreachable): keep waiting", async () => {
+    const src = source(2, { left: 1 });
+    assert.equal(await versionReloadCheck(src, quiet), "unsent");
+    assert.equal(src.flushes, 1);
+  });
+
+  test("a flush that rejects anyway is still re-checked", async () => {
+    const src = source(2, { left: 2, fails: true });
+    assert.equal(await versionReloadCheck(src, quiet), "unsent");
+  });
+
+  test("the state is read again after the flush: someone started typing meanwhile", async () => {
+    const src = source(1);
+    let reads = 0;
+    const state = () => (reads++ === 0 ? quiet() : { now: now + 50, pendingSince: now, lastInputAt: now + 40 });
+    assert.equal(await versionReloadCheck(src, state), "active");
+    assert.equal(reads, 2);
+  });
+
+  test("nothing unsent: still a last flush (it settles a push already in flight) before going", async () => {
+    const src = source(0);
+    assert.equal(await versionReloadCheck(src, quiet), "");
+    assert.equal(src.flushes, 1);
+  });
+
+  test("other blockers don't flush (no reload is coming anyway)", async () => {
+    const src = source(0);
+    assert.equal(await versionReloadCheck(src, () => ({ now, pendingSince: now, lastInputAt: idle, dialogOpen: true })), "dialog");
+    assert.equal(await versionReloadCheck(src, () => ({ now, pendingSince: now, lastInputAt: idle, dragging: true })), "drag");
+    assert.equal(src.flushes, 0);
+  });
+
+  test("a source without flush() falls back to the plain blocker", async () => {
+    assert.equal(await versionReloadCheck({ mode: "local", unsent: 1 }, quiet), "unsent");
+    assert.equal(await versionReloadCheck({ mode: "local", _outbox: [] }, quiet), "");
+    assert.equal(await versionReloadCheck(null, quiet), "");
+  });
+
+  test("app.js reloads for a new version only through versionReloadCheck", () => {
+    const app = readFileSync(`${ROOT}static/js/app.js`, "utf8");
+    assert.match(app, /await versionReloadCheck\(ctx\.source,/);
+    assert.doesNotMatch(app, /versionReloadBlocker\(/);
   });
 });
 
@@ -545,6 +634,86 @@ describe("sync popover", () => {
 
 // --------------------------------------------------------------- setup dialog
 describe("GitHub settings dialog", () => {
+  const PAGES = { hostname: "richard-0417.github.io", host: "richard-0417.github.io", pathname: "/lab-hub/", search: "" };
+  const LOCAL = { hostname: "localhost", host: "localhost:8000", pathname: "/", search: "" };
+  const json = (status, obj) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+
+  // A fake GitHub for testGitHubSettings: GET /repos/<r> answers `repos[r]`
+  // (a status; default 200), POST /repos/<r>/git/blobs answers `blobs[r]`
+  // (default 403). Keys are lower-case repo names.
+  function ghCheck({ repos = {}, blobs = {} } = {}) {
+    const calls = [];
+    const f = async (url, init = {}) => {
+      const method = (init.method || "GET").toUpperCase();
+      calls.push({ url, method });
+      const m = /^\/repos\/([^/]+\/[^/]+)(\/git\/blobs)?$/.exec(new URL(url).pathname);
+      if (!m) return json(404, { message: "Not Found" });
+      const repo = m[1].toLowerCase();
+      if (!m[2]) return repos[repo] ? json(repos[repo], { message: "Bad credentials" }) : json(200, { private: false });
+      const b = blobs[repo] === undefined ? 403 : blobs[repo];
+      return b === 201 ? json(201, { sha: "abc" }) : json(b, { message: b === 403 ? "Resource not accessible by personal access token" : "Server Error" });
+    };
+    f.calls = calls;
+    f.probes = () => calls.filter((c) => c.method === "POST").length;
+    return f;
+  }
+
+  const until = async (cond, what = "condition") => {
+    for (let i = 0; i < 200; i++) {
+      if (cond()) return;
+      await tick();
+    }
+    assert.fail(`timed out waiting for ${what}`);
+  };
+
+  function setupWith(opts = {}) {
+    const dom = installDom();
+    const calls = [];
+    const dlg = openSetup(
+      Object.assign(
+        {
+          initial: { apiBase: "https://api.github.com", repo: "richard-0417/lab-hub", branch: "data", path: "board.json", token: "github_pat_x", clientName: "R" },
+          hasToken: true, // the saved token is used unless a new one is pasted
+          onConnect: (s, info) => calls.push(["connect", s, info]),
+          onReadOnly: (s) => calls.push(["readonly", s]),
+          onForget: () => calls.push(["forget"]),
+        },
+        opts,
+      ),
+    );
+    const q = (sel) => dlg.dialog.querySelector(sel);
+    const input = (label) => {
+      const l = dlg.dialog.querySelectorAll("label.fld-label").find((x) => x.textContent === label);
+      return l ? dlg.dialog.querySelector(`#${l.getAttribute("for")}`) : null;
+    };
+    const type = (label, value) => {
+      const el = input(label);
+      el.value = value;
+      el.dispatchEvent(new dom.Event("input", { bubbles: true }));
+    };
+    const status = () => q(".setup-status:not(.setup-warnings)");
+    return { dom, calls, dlg, q, input, type, status };
+  }
+
+  /** Run fn with a fresh dialog; always restores the DOM. */
+  async function withSetup(opts, fn) {
+    const t = setupWith(opts);
+    try {
+      await tick(); // the dialog's initial focus lands (requestAnimationFrame)
+      await fn(t);
+    } finally {
+      t.dom.restore();
+    }
+  }
+
+  // Click Connect and wait until the check is over (button enabled again or dialog closed).
+  async function clickConnect(t) {
+    const btn = t.q('[data-act="connect"]');
+    btn.click();
+    await until(() => !t.dlg.dialog.isConnected || (!btn.disabled && !/Checking/.test(btn.textContent)), "the check");
+    return btn;
+  }
+
   test("readOnlyConfirm wording", () => {
     assert.match(readOnlyConfirm(0).warn, /token will be removed/);
     assert.match(readOnlyConfirm(1).warn, /^1 unsynced change from/);
@@ -552,26 +721,8 @@ describe("GitHub settings dialog", () => {
     assert.match(readOnlyConfirm(3).label, /Remove token/);
   });
 
-  function setupWith(opts) {
-    const dom = installDom();
-    const calls = [];
-    const dlg = openSetup(
-      Object.assign(
-        {
-          initial: { apiBase: "https://api.github.com", repo: "richard-0417/lab-hub", branch: "data", path: "board.json", token: "github_pat_x", clientName: "R" },
-          onConnect: (s) => calls.push(["connect", s]),
-          onReadOnly: (s) => calls.push(["readonly", s]),
-          onForget: () => calls.push(["forget"]),
-        },
-        opts,
-      ),
-    );
-    return { dom, calls, dlg };
-  }
-
-  test("existing setup with a token: View read-only takes a second click", () => {
-    const { dom, calls, dlg } = setupWith({ existing: true, hasToken: true, pending: 2 });
-    try {
+  test("existing setup with a token: View read-only takes a second click", async () => {
+    await withSetup({ existing: true, hasToken: true, pending: 2 }, async ({ calls, dlg }) => {
       const ro = dlg.dialog.querySelector('[data-act="readonly"]');
       ro.click();
       assert.deepEqual(calls, []);
@@ -582,27 +733,285 @@ describe("GitHub settings dialog", () => {
       assert.equal(calls[0][0], "readonly");
       assert.equal(calls[0][1].token, "");
       assert.equal(dlg.dialog.isConnected, false);
-    } finally {
-      dom.restore();
+    });
+  });
+
+  test("first run: View read-only is one click (no token to lose); Cancel exists only for an existing setup", async () => {
+    await withSetup({ existing: false, hasToken: false }, async ({ calls, q }) => {
+      assert.equal(q('[data-act="cancel"]'), null);
+      q('[data-act="readonly"]').click();
+      assert.equal(calls.length, 1);
+    });
+    await withSetup({ existing: true, hasToken: true }, async ({ calls, q, dlg }) => {
+      q('[data-act="cancel"]').click();
+      assert.deepEqual(calls, []);
+      assert.equal(dlg.dialog.isConnected, false);
+    });
+  });
+
+  // ------------------------------------------------------------ texts
+  test("the permission hint names the board repo and follows the Repository field", async () => {
+    await withSetup({ loc: PAGES }, async ({ q, type }) => {
+      const help = q(".token-help");
+      assert.match(help.textContent, /Only select repositories → richard-0417\/lab-hub/);
+      assert.match(help.textContent, /Repository permissions → Contents: Read and write/);
+      type("Repository", "https://github.com/Someone/Lab-Data.git");
+      assert.equal(q(".token-repo").textContent, "Someone/Lab-Data");
+      type("Repository", "");
+      assert.equal(q(".token-repo").textContent, "the board's repo");
+    });
+  });
+
+  test("where the token is kept: this browser's storage for the page's site, readable by its pages", async () => {
+    assert.equal(
+      tokenStorageNote(PAGES),
+      "The token is kept in this browser's storage for richard-0417.github.io (readable by any page served from that site) and is sent only to api.github.com.",
+    );
+    assert.match(tokenStorageNote(LOCAL, { customApi: true }), /storage for localhost:8000 .*sent only to the API base under Advanced\.$/);
+    assert.match(tokenStorageNote(null), /storage for this site/);
+    await withSetup({ loc: PAGES }, async ({ q }) => {
+      assert.equal(q(".storage-note").textContent, tokenStorageNote(PAGES));
+      assert.doesNotMatch(q(".token-help").textContent, /stored only in this browser/);
+    });
+    const code = ["setup.js", "header.js"].map((f) => readFileSync(`${ROOT}static/js/ui/${f}`, "utf8")).join("\n");
+    assert.doesNotMatch(code, /stored only in this browser/);
+  });
+
+  test("one calm trust note in the one-repo setup; none when the board is in a separate data repo", async () => {
+    assert.equal(TRUST_NOTE, "Anyone with a token can also change the dashboard's code on GitHub — only give tokens to people you trust.");
+    assert.equal(boardIsCodeRepo("richard-0417/lab-hub", PAGES), true);
+    assert.equal(boardIsCodeRepo("Richard-0417/Lab-Hub", PAGES), true, "GitHub names are case-insensitive");
+    assert.equal(boardIsCodeRepo("richard-0417/lab-hub-data", PAGES), false);
+    assert.equal(boardIsCodeRepo("richard-0417/lab-hub", LOCAL), true, "off Pages: the default repo is the code repo");
+    assert.equal(boardIsCodeRepo("", PAGES), false);
+    await withSetup({ loc: PAGES }, async ({ dlg, q, type }) => {
+      const notes = dlg.dialog.querySelectorAll(".trust-note");
+      assert.equal(notes.length, 1);
+      assert.equal(notes[0].hidden, false);
+      assert.equal(notes[0].textContent, TRUST_NOTE);
+      assert.equal(dlg.dialog.textContent.split(TRUST_NOTE).length - 1, 1, "said once");
+      assert.doesNotMatch(q(".trust-note").className, /warn/, "a note, not a warning");
+      type("Repository", "richard-0417/lab-hub-data");
+      assert.equal(q(".trust-note").hidden, true);
+      type("Repository", "RICHARD-0417/lab-hub");
+      assert.equal(q(".trust-note").hidden, false);
+    });
+  });
+
+  test("Advanced (API base) only on a local development page", async () => {
+    await withSetup({ loc: PAGES, initial: { apiBase: "http://127.0.0.1:9999", repo: "richard-0417/lab-hub", token: "github_pat_x" } }, async ({ q, input }) => {
+      assert.equal(q("details.advanced"), null);
+      assert.equal(input("API base"), null);
+    });
+    await withSetup({ loc: LOCAL }, async ({ q, input }) => {
+      assert.ok(q("details.advanced"));
+      assert.equal(input("API base").value, "https://api.github.com");
+      assert.equal(q("details.advanced").open, false);
+    });
+    await withSetup({ loc: LOCAL, initial: { apiBase: "http://127.0.0.1:9999", repo: "o/r" } }, async ({ q }) => {
+      assert.equal(q("details.advanced").open, true, "a custom API base is shown, flagged");
+      assert.match(q("details.advanced").className, /custom/);
+    });
+  });
+
+  test("on a non-local page a saved custom API base is never used", async () => {
+    const f = ghCheck({ blobs: { "richard-0417/lab-hub": 201 } });
+    await withSetup({ loc: PAGES, fetchImpl: f, initial: { apiBase: "http://127.0.0.1:9999", repo: "richard-0417/lab-hub", branch: "data", path: "board.json", token: "" } }, async (t) => {
+      t.type("Token", "github_pat_new");
+      await clickConnect(t);
+      assert.ok(f.calls.length > 0);
+      for (const c of f.calls) assert.ok(c.url.startsWith("https://api.github.com/"), c.url);
+      assert.equal(t.calls[0][1].apiBase, "https://api.github.com");
+    });
+  });
+
+  // ------------------------------------------------------- validation
+  test("invalidField names the field githubSettingsError is about", () => {
+    assert.equal(invalidField({ repo: "a/b", branch: "data", path: "board.json", token: "t" }), null);
+    assert.equal(invalidField({ repo: "nope" }), "repo");
+    assert.equal(invalidField({ repo: "a/b", branch: "x..y" }), "branch");
+    assert.equal(invalidField({ repo: "a/b", path: "a/../b" }), "path");
+    assert.equal(invalidField({ repo: "a/b", token: "tök" }), "token");
+    assert.equal(invalidField({ repo: "nope", branch: "x..y" }), "repo", "first one wins, like the message");
+  });
+
+  test("bad settings are caught inline, before anything is sent to GitHub", async () => {
+    const cases = [
+      ["Repository", "nope", /owner\/name/],
+      ["Branch", "x..y", /"x\.\.y" isn't a usable branch name/],
+      ["File", "a/../board.json", /isn't a usable file path/],
+      ["Token", "github_pat_ä", /invalid characters/],
+    ];
+    for (const [label, value, msg] of cases) {
+      const f = ghCheck();
+      await withSetup({ fetchImpl: f, loc: PAGES }, async (t) => {
+        t.type(label, value);
+        t.q('[data-act="connect"]').click();
+        await tick();
+        assert.equal(f.calls.length, 0, `${label}: nothing sent`);
+        assert.deepEqual(t.calls, [], `${label}: not connected`);
+        assert.equal(t.status().hidden, false);
+        assert.match(t.status().className, /error/);
+        assert.match(t.status().textContent, msg, label);
+        const el = t.input(label);
+        assert.equal(el.getAttribute("aria-invalid"), "true", label);
+        assert.ok(document.activeElement === el, `${label} gets focus`); // (no DOM-sized diff on failure)
+        t.type(label, "x");
+        assert.equal(el.hasAttribute("aria-invalid"), false, "typing clears the mark");
+      });
     }
   });
 
-  test("first run: View read-only is one click (no token to lose); Cancel exists only for an existing setup", () => {
-    const first = setupWith({ existing: false, hasToken: false });
-    try {
-      assert.equal(first.dlg.dialog.querySelector('[data-act="cancel"]'), null);
-      first.dlg.dialog.querySelector('[data-act="readonly"]').click();
-      assert.equal(first.calls.length, 1);
-    } finally {
-      first.dom.restore();
+  test("View read-only checks repo, branch and file too", async () => {
+    await withSetup({ loc: PAGES }, async (t) => {
+      t.type("Branch", "-/.lock");
+      t.q('[data-act="readonly"]').click();
+      assert.deepEqual(t.calls, []);
+      assert.match(t.status().textContent, /usable branch name/);
+      t.type("Branch", "data");
+      t.q('[data-act="readonly"]').click();
+      assert.equal(t.calls[0][0], "readonly");
+    });
+  });
+
+  // ------------------------------------------------- the GitHub check
+  test("connectDecision maps testGitHubSettings results", () => {
+    assert.deepEqual(connectDecision({ ok: false, error: "Can't reach GitHub" }), { action: "error", message: "Can't reach GitHub", warnings: [] });
+    assert.deepEqual(connectDecision({ ok: true, error: null, canWrite: true, warnings: [] }), { action: "connect", note: null, warnings: [] });
+    assert.deepEqual(connectDecision({ ok: true, error: "Couldn't confirm", canWrite: null, warnings: ["w"] }), { action: "connect", note: "Couldn't confirm", warnings: ["w"] });
+    assert.deepEqual(connectDecision({ ok: true, error: "read only", canWrite: false, warnings: [] }), { action: "confirm", message: "read only", warnings: [] });
+    assert.equal(connectDecision({ ok: true }).action, "confirm", "unknown write access is not 'can write'");
+    assert.equal(connectDecision(null).action, "error");
+    assert.deepEqual(connectDecision({ ok: true, canWrite: true, warnings: ["a", "", 3] }).warnings, ["a"]);
+    assert.equal(sentence("no stop"), "no stop.");
+    assert.equal(sentence("Stop."), "Stop.");
+    assert.equal(sentence(""), "");
+  });
+
+  test("canWrite true: connects at once, with nothing to tell", async () => {
+    const f = ghCheck({ blobs: { "richard-0417/lab-hub": 201 } });
+    await withSetup({ fetchImpl: f, loc: PAGES }, async (t) => {
+      await clickConnect(t);
+      assert.equal(t.calls.length, 1);
+      const [kind, s, info] = t.calls[0];
+      assert.equal(kind, "connect");
+      assert.deepEqual([s.repo, s.branch, s.path, s.token, s.clientName], ["richard-0417/lab-hub", "data", "board.json", "github_pat_x", "R"]);
+      assert.deepEqual(info, { note: null, warnings: [] });
+      assert.equal(t.dlg.dialog.isConnected, false);
+      assert.equal(f.probes(), 1, "one write probe, no code-repo probe in the one-repo setup");
+    });
+  });
+
+  test("canWrite null: connects at once and hands over the note", async () => {
+    for (const status of [500, 409, 422]) {
+      const f = ghCheck({ blobs: { "richard-0417/lab-hub": status } });
+      await withSetup({ fetchImpl: f, loc: PAGES }, async (t) => {
+        await clickConnect(t);
+        assert.equal(t.calls.length, 1, String(status));
+        assert.equal(t.calls[0][0], "connect");
+        assert.match(t.calls[0][2].note, /^Couldn't confirm that this token can write to richard-0417\/lab-hub \(GitHub answered HTTP \d+/);
+        assert.deepEqual(t.calls[0][2].warnings, []);
+      });
     }
-    const existing = setupWith({ existing: true, hasToken: true });
-    try {
-      existing.dlg.dialog.querySelector('[data-act="cancel"]').click();
-      assert.deepEqual(existing.calls, []);
-      assert.equal(existing.dlg.dialog.isConnected, false);
-    } finally {
-      existing.dom.restore();
-    }
+  });
+
+  test("canWrite false: explains, then needs “Connect anyway” (no second probe)", async () => {
+    const f = ghCheck({ blobs: { "richard-0417/lab-hub": 403 } });
+    await withSetup({ fetchImpl: f, loc: PAGES }, async (t) => {
+      const btn = await clickConnect(t);
+      assert.deepEqual(t.calls, []);
+      assert.equal(t.dlg.dialog.isConnected, true);
+      assert.match(t.status().className, /warn/);
+      assert.match(t.status().textContent, /^This token can read richard-0417\/lab-hub but not write it — give it Contents: Read and write\. Click “Connect anyway”/);
+      assert.match(btn.textContent, /Connect anyway/);
+      const before = f.calls.length;
+      btn.click();
+      await tick();
+      assert.equal(f.calls.length, before, "the armed click doesn't ask GitHub again");
+      assert.equal(t.calls.length, 1);
+      assert.deepEqual(t.calls[0][2], { note: null, warnings: [] });
+    });
+  });
+
+  test("editing a field disarms “Connect anyway” and checks again", async () => {
+    const f = ghCheck({ blobs: { "richard-0417/lab-hub": 403 } });
+    await withSetup({ fetchImpl: f, loc: PAGES, existing: true, hasToken: true }, async (t) => {
+      const btn = await clickConnect(t);
+      assert.match(btn.textContent, /Connect anyway/);
+      t.type("Token", "github_pat_other");
+      assert.match(btn.textContent, /^Save$/);
+      await clickConnect(t);
+      assert.deepEqual(t.calls, [], "the new token is checked, and can't write either");
+      assert.equal(f.probes(), 2);
+    });
+  });
+
+  test("two-repo setup: the code-repo warning is passed on and never blocks", async () => {
+    const f = ghCheck({ blobs: { "richard-0417/lab-hub-data": 201, "richard-0417/lab-hub": 201 } });
+    await withSetup({ fetchImpl: f, loc: PAGES, initial: { repo: "richard-0417/lab-hub-data", token: "github_pat_x" } }, async (t) => {
+      await clickConnect(t);
+      assert.equal(t.calls.length, 1);
+      assert.equal(t.calls[0][2].note, null);
+      assert.deepEqual(t.calls[0][2].warnings, [
+        "This token can also change the dashboard's code (richard-0417/lab-hub). For the separate-data-repo setup, give it access to richard-0417/lab-hub-data only.",
+      ]);
+    });
+  });
+
+  test("two-repo setup, read-only token: the warning shows (amber) next to the explanation", async () => {
+    const f = ghCheck({ blobs: { "richard-0417/lab-hub-data": 403, "richard-0417/lab-hub": 201 } });
+    await withSetup({ fetchImpl: f, loc: PAGES, initial: { repo: "richard-0417/lab-hub-data", token: "github_pat_x" } }, async (t) => {
+      await clickConnect(t);
+      assert.deepEqual(t.calls, []);
+      const w = t.q(".setup-warnings");
+      assert.equal(w.hidden, false);
+      assert.match(w.className, /warn/);
+      assert.match(w.textContent, /can also change the dashboard's code/);
+      t.q('[data-act="connect"]').click();
+      await tick();
+      assert.equal(t.calls.length, 1);
+      assert.equal(t.calls[0][2].warnings.length, 1);
+    });
+  });
+
+  test("a failed check stays open with the error", async () => {
+    const f = ghCheck({ repos: { "richard-0417/lab-hub": 401 } });
+    await withSetup({ fetchImpl: f, loc: PAGES }, async (t) => {
+      await clickConnect(t);
+      assert.deepEqual(t.calls, []);
+      assert.match(t.status().className, /error/);
+      assert.match(t.status().textContent, /GitHub rejected this token/);
+      assert.equal(t.q(".setup-warnings").hidden, true);
+    });
+  });
+
+  test("no token: asks for one (or read-only) without asking GitHub", async () => {
+    const f = ghCheck();
+    await withSetup({ fetchImpl: f, loc: PAGES, hasToken: false, initial: { repo: "richard-0417/lab-hub" } }, async (t) => {
+      t.q('[data-act="connect"]').click();
+      await tick();
+      assert.equal(f.calls.length, 0);
+      assert.match(t.status().textContent, /Paste a token to edit/);
+    });
+  });
+
+  test("closing the dialog while the check runs cancels the connect", async () => {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const inner = ghCheck({ blobs: { "richard-0417/lab-hub": 201 } });
+    const f = async (url, init) => {
+      await gate;
+      return inner(url, init);
+    };
+    await withSetup({ fetchImpl: f, loc: PAGES }, async (t) => {
+      t.q('[data-act="connect"]').click();
+      await tick();
+      assert.match(t.q('[data-act="connect"]').textContent, /Checking/);
+      t.dlg.close();
+      release();
+      await until(() => inner.calls.length >= 2, "the check to finish");
+      await tick();
+      assert.deepEqual(t.calls, []);
+    });
   });
 });

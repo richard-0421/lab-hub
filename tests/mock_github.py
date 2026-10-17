@@ -9,10 +9,18 @@ the GitHub Pages frontend against it):
     PUT  /repos/{o}/{r}/contents/{path}         sha checks: 422 missing sha, 409 wrong sha,
                                                 404 unknown branch
     GET  /repos/{o}/{r}/git/ref/heads/{b}
-    POST /repos/{o}/{r}/git/refs
+    POST /repos/{o}/{r}/git/refs                {ref, sha}; 422 "Reference already exists"
     GET  /repos/{o}/{r}/git/blobs/{sha}
-    GET  /repos/{o}/{r}/commits?sha=b&path=p&per_page=n   newest first
+    POST /repos/{o}/{r}/git/blobs               {content, encoding: utf-8|base64}
+    POST /repos/{o}/{r}/git/trees               {tree: [{path, mode, type, content|sha}], base_tree?}
+    POST /repos/{o}/{r}/git/commits             {message, tree, parents: []} ([] = root commit)
+    GET  /repos/{o}/{r}/commits?sha=b&path=p&per_page=n   newest first (walks the parents)
     GET  /user
+
+Blob and tree shas are real git object ids; commit shas are made up. An
+``empty=True`` repo has no commits at all: contents answer 404 "This
+repository is empty." and the git database API 409 "Git Repository is
+empty." (like GitHub).
 
 Auth: "Authorization: Bearer <token>" or "token <token>"; a wrong token -> 401;
 no token on a private repo -> 404 (like GitHub). CORS headers on every
@@ -20,7 +28,8 @@ response; OPTIONS preflight answered.
 
 Python test hooks (methods on MockGitHub): fail_next(), on_next(),
 drop_response_next() (handle a request, then hang up without answering),
-set_file_text(), get_file_text(), set_offline(), requests (log), commits().
+set_file_text(), get_file_text(), set_offline(), requests (log), commits(),
+commit(sha), head(branch).
 
 HTTP control endpoints (handy from curl during manual tests; no auth):
     GET  /_mock/state                       branches, files, commit counts
@@ -32,7 +41,7 @@ HTTP control endpoints (handy from curl during manual tests; no auth):
 
 Run:
     python tests/mock_github.py --port 9010 --repo richard-0417/lab-hub \\
-        --token test-token [--private] [--no-data-branch] [--seed board.json]
+        --token test-token [--private] [--no-data-branch | --empty] [--seed board.json]
 """
 import argparse
 import base64
@@ -68,6 +77,15 @@ def wrap_b64(data):
     return "".join(b64[i:i + 60] + "\n" for i in range(0, len(b64), 60))
 
 
+EMPTY_REPO = "Git Repository is empty."
+TREE_MODES = {"100644": "blob", "100755": "blob", "120000": "blob", "040000": "tree", "160000": "commit"}
+
+
+def _tree_path_ok(path):
+    return (isinstance(path, str) and path and not path.startswith("/") and not path.endswith("/")
+            and all(p not in ("", ".", "..", ".git") for p in path.split("/")))
+
+
 class MockGitHub(object):
     def __init__(
         self,
@@ -79,6 +97,7 @@ class MockGitHub(object):
         default_branch="main",
         host="127.0.0.1",
         port=0,
+        empty=False,
     ):
         self.owner, self.name = repo.split("/", 1)
         self.token = token
@@ -88,10 +107,17 @@ class MockGitHub(object):
         self._counter = 0
         # branch -> {"commit": sha, "files": {path: bytes}}
         self.branches = {}
-        self._commits = []  # [{"sha", "branch", "message", "paths", "files", "date"}]
-        self._new_commit(default_branch, {"README.md": b"# lab-hub\n"}, "Initial commit")
-        if create_data_branch:
-            self._new_commit(data_branch, dict(self.branches[default_branch]["files"]), "create %s" % data_branch)
+        # [{"sha", "branch", "message", "paths", "files", "date", "tree", "parents"}], oldest first;
+        # "branch" is None for a commit made through git/commits until a ref points at it
+        self._commits = []
+        self._by_sha = {}
+        self.blobs = {}   # git object id -> bytes
+        self.trees = {}   # git object id -> {"files": {path: bytes}, "entries": [(name, mode, type, sha)]}
+        if not empty:
+            self._new_commit(default_branch, {"README.md": b"# lab-hub\n"}, "Initial commit")
+            if create_data_branch:
+                self._new_commit(data_branch, dict(self.branches[default_branch]["files"]), "create %s" % data_branch,
+                                 parents=[self.branches[default_branch]["commit"]])
         self.requests = []
         self._fails = []
         self._hooks = []
@@ -125,14 +151,76 @@ class MockGitHub(object):
             self._thread.join(5)
 
     # ---- state helpers -------------------------------------------------- #
-    def _new_commit(self, branch, files, message, paths=()):
+    @property
+    def is_empty(self):
+        """No commits at all (GitHub's "This repository is empty.")."""
+        return not self._commits
+
+    def _store_blob(self, data):
+        sha = blob_sha(data)
+        self.blobs[sha] = data
+        return sha
+
+    def _store_tree(self, files):
+        """Store the git tree (and its subtrees and blobs) for {path: bytes};
+        return its object id. ValueError when a path is both a file and a
+        directory."""
+        with self.lock:
+            top = {}
+            for path, data in files.items():
+                head, sep, rest = path.partition("/")
+                kind, value = top.setdefault(head, ("tree", {}) if sep else ("blob", data))
+                if (kind == "tree") != bool(sep):
+                    raise ValueError("%s is both a file and a directory" % head)
+                if sep:
+                    value[rest] = data
+            entries = []
+            for name, (kind, value) in top.items():
+                if kind == "blob":
+                    entries.append((name, "100644", "blob", self._store_blob(value)))
+                else:
+                    entries.append((name, "040000", "tree", self._store_tree(value)))
+            # git's order: by name, a directory compared as "name/"
+            entries.sort(key=lambda e: e[0].encode("utf-8") + (b"/" if e[2] == "tree" else b""))
+            raw = b"".join(b"%s %s\0" % (mode.lstrip("0").encode(), name.encode("utf-8")) + bytes.fromhex(sha)
+                           for name, mode, _kind, sha in entries)
+            sha = hashlib.sha1(b"tree %d\0" % len(raw) + raw).hexdigest()
+            self.trees[sha] = {"files": dict(files), "entries": entries}
+            return sha
+
+    def _new_commit(self, branch, files, message, paths=None, parents=None):
+        """Record a commit of ``files``. ``branch`` None: no ref points at it
+        yet (git/commits). ``parents`` defaults to the branch's head; ``paths``
+        (the files it touched) defaults to what differs from the first parent."""
         with self.lock:
             self._counter += 1
             sha = hashlib.sha1(("commit-%d-%s-%f" % (self._counter, branch, time.time())).encode()).hexdigest()
-            self.branches[branch] = {"commit": sha, "files": files}
-            self._commits.append({"sha": sha, "branch": branch, "message": message, "paths": list(paths),
-                                  "files": files, "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+            if parents is None:
+                parents = [self.branches[branch]["commit"]] if branch in self.branches else []
+            if paths is None:
+                before = self._by_sha[parents[0]]["files"] if parents else {}
+                paths = sorted(p for p in set(before) | set(files) if before.get(p) != files.get(p))
+            tree = self._store_tree(files)
+            if branch is not None:
+                self.branches[branch] = {"commit": sha, "files": files}
+            commit = {"sha": sha, "branch": branch, "message": message, "paths": list(paths), "files": files,
+                      "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tree": tree,
+                      "parents": list(parents)}
+            self._commits.append(commit)
+            self._by_sha[sha] = commit
             return sha
+
+    def commit(self, sha):
+        """The recorded commit (a copy), or None."""
+        with self.lock:
+            c = self._by_sha.get(sha)
+            return dict(c) if c else None
+
+    def head(self, branch):
+        """The commit a branch points at (a copy), or None."""
+        with self.lock:
+            b = self.branches.get(branch)
+            return self.commit(b["commit"]) if b else None
 
     def set_file_text(self, branch, path, text, message="edit via web"):
         """Simulate a hand edit / another client. Creates the branch (from the
@@ -140,7 +228,9 @@ class MockGitHub(object):
         data = text.encode("utf-8") if isinstance(text, str) else bytes(text)
         with self.lock:
             if branch not in self.branches:
-                self._new_commit(branch, dict(self.branches[self.default_branch]["files"]), "create " + branch)
+                base = self.branches.get(self.default_branch)
+                self._new_commit(branch, dict(base["files"]) if base else {}, "create " + branch,
+                                 parents=[base["commit"]] if base else [])
             files = dict(self.branches[branch]["files"])
             files[path] = data
             self._new_commit(branch, files, message, [path])
@@ -389,15 +479,38 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._get_contents(fpath, query)
                 if method == "PUT":
                     return self._put_contents(fpath, body)
+            if rest[:1] == ["git"] and mock.is_empty:
+                return self._error(409, EMPTY_REPO)
             if rest[:3] == ["git", "ref", "heads"] and len(rest) >= 4 and method == "GET":
                 return self._get_ref("/".join(rest[3:]))
             if rest == ["git", "refs"] and method == "POST":
                 return self._create_ref(body)
             if rest[:2] == ["git", "blobs"] and len(rest) == 3 and method == "GET":
                 return self._get_blob(rest[2])
+            if rest == ["git", "blobs"] and method == "POST":
+                return self._create_blob(body)
+            if rest == ["git", "trees"] and method == "POST":
+                return self._create_tree(body)
+            if rest == ["git", "commits"] and method == "POST":
+                return self._create_commit(body)
             if rest == ["commits"] and method == "GET":
                 return self._list_commits(query)
         return self._error(404, "Not Found")
+
+    def _json_body(self, body):
+        """The request's JSON object, or None after answering 400."""
+        try:
+            req = json.loads(body.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            req = None
+        if not isinstance(req, dict):
+            self._error(400, "Problems parsing JSON")
+            return None
+        return req
+
+    def _api_url(self, suffix):
+        mock = self.mock
+        return "%s/repos/%s/%s%s" % (mock.url, mock.owner, mock.name, suffix)
 
     # ---- endpoints ------------------------------------------------------ #
     def _repo(self):
@@ -432,6 +545,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _get_contents(self, fpath, query):
         mock = self.mock
+        if mock.is_empty:
+            return self._error(404, "This repository is empty.")
         ref = query.get("ref") or mock.default_branch
         branch = mock.branches.get(ref)
         if branch is None:
@@ -497,61 +612,176 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _list_commits(self, query):
         mock = self.mock
-        branch = query.get("sha") or mock.default_branch
-        if branch not in mock.branches:
-            return self._error(404, "No commit found for SHA: %s" % branch)
+        if mock.is_empty:
+            return self._error(409, EMPTY_REPO)
+        start = query.get("sha") or mock.default_branch
+        if start in mock.branches:
+            sha = mock.branches[start]["commit"]
+        elif start in mock._by_sha:
+            sha = start
+        else:
+            return self._error(404, "No commit found for SHA: %s" % start)
         fpath = query.get("path")
         try:
             per_page = max(1, min(100, int(query.get("per_page") or 30)))
         except ValueError:
             per_page = 30
         out = []
-        for c in reversed(mock._commits):
-            if c["branch"] != branch or (fpath and fpath not in c["paths"]):
-                continue
-            out.append({"sha": c["sha"], "commit": {"message": c["message"],
-                                                    "committer": {"name": "mock", "date": c["date"]}}})
-            if len(out) >= per_page:
-                break
+        while sha and len(out) < per_page:  # histories here are linear: follow the first parent
+            c = mock._by_sha[sha]
+            if not fpath or fpath in c["paths"]:
+                out.append({"sha": c["sha"], "commit": {"message": c["message"],
+                                                        "committer": {"name": "mock", "date": c["date"]}},
+                            "parents": [{"sha": p} for p in c["parents"]]})
+            sha = c["parents"][0] if c["parents"] else None
         return self._json(200, out)
+
+    def _ref_body(self, name, sha):
+        return {"ref": "refs/heads/" + name, "node_id": "REF_" + sha[:12],
+                "url": self._api_url("/git/refs/heads/" + name),
+                "object": {"sha": sha, "type": "commit", "url": self._api_url("/git/commits/" + sha)}}
 
     def _get_ref(self, name):
         mock = self.mock
         branch = mock.branches.get(name)
         if branch is None:
             return self._error(404, "Not Found")
-        return self._json(200, {"ref": "refs/heads/" + name, "object": {"sha": branch["commit"], "type": "commit"}})
+        return self._json(200, self._ref_body(name, branch["commit"]))
 
     def _create_ref(self, body):
         mock = self.mock
-        try:
-            req = json.loads(body.decode("utf-8"))
-            ref, sha = req["ref"], req["sha"]
-        except Exception:  # noqa: BLE001
-            return self._error(422, "Invalid request.")
-        if not isinstance(ref, str) or not ref.startswith("refs/heads/") or len(ref) <= len("refs/heads/"):
+        req = self._json_body(body)
+        if req is None:
+            return
+        ref, sha = req.get("ref"), req.get("sha")
+        if not isinstance(ref, str) or not isinstance(sha, str):
+            return self._error(422, "Invalid request.\n\n\"ref\" and \"sha\" are required.")
+        if not ref.startswith("refs/heads/") or len(ref) <= len("refs/heads/"):
             return self._error(422, "Reference name must start with 'refs/' and have at least two slashes.")
         name = ref[len("refs/heads/"):]
         if name in mock.branches:
             return self._error(422, "Reference already exists")
-        source = None
-        for b in mock.branches.values():
-            if b["commit"] == sha:
-                source = b
-                break
-        if source is None:
+        commit = mock._by_sha.get(sha)
+        if commit is None:
             return self._error(422, "Object does not exist")
-        mock.branches[name] = {"commit": sha, "files": dict(source["files"])}
-        return self._json(201, {"ref": ref, "object": {"sha": sha, "type": "commit"}})
+        mock.branches[name] = {"commit": sha, "files": dict(commit["files"])}
+        if commit["branch"] is None:
+            commit["branch"] = name
+        return self._json(201, self._ref_body(name, sha))
 
     def _get_blob(self, sha):
+        data = self.mock.blobs.get(sha)
+        if data is None:
+            return self._error(404, "Not Found")
+        return self._json(200, {"sha": sha, "node_id": "BLOB_" + sha[:12], "size": len(data),
+                                "url": self._api_url("/git/blobs/" + sha), "encoding": "base64",
+                                "content": wrap_b64(data)})
+
+    def _create_blob(self, body):
+        req = self._json_body(body)
+        if req is None:
+            return
+        content, encoding = req.get("content"), req.get("encoding", "utf-8")
+        if not isinstance(content, str):
+            return self._error(422, "Invalid request.\n\n\"content\" wasn't supplied.")
+        if encoding == "utf-8":
+            data = content.encode("utf-8", "surrogatepass")
+        elif encoding == "base64":
+            try:
+                data = base64.b64decode("".join(content.split()), validate=True)
+            except Exception:  # noqa: BLE001
+                return self._error(422, "Invalid Base64 content")
+        else:
+            return self._error(422, "encoding must be utf-8 or base64")
+        sha = self.mock._store_blob(data)
+        return self._json(201, {"url": self._api_url("/git/blobs/" + sha), "sha": sha})
+
+    def _create_tree(self, body):
+        """Like GitHub: entries with ``content`` (utf-8 text) or ``sha`` (an
+        existing blob; null deletes the path from ``base_tree``); without
+        ``base_tree`` the tree holds exactly the given entries."""
         mock = self.mock
-        for b in mock.branches.values():
-            for data in b["files"].values():
-                if blob_sha(data) == sha:
-                    return self._json(200, {"sha": sha, "size": len(data), "encoding": "base64",
-                                            "content": wrap_b64(data)})
-        return self._error(404, "Not Found")
+        req = self._json_body(body)
+        if req is None:
+            return
+        entries = req.get("tree")
+        if not isinstance(entries, list):
+            return self._error(422, "Invalid request.\n\n\"tree\" wasn't supplied.")
+        files = {}
+        base = req.get("base_tree")
+        if base is not None:
+            if base not in mock.trees:
+                return self._error(422, "base_tree is not a valid tree oid")
+            files = dict(mock.trees[base]["files"])
+        for e in entries:
+            if not isinstance(e, dict):
+                return self._error(422, "Invalid tree info")
+            path, mode, kind = e.get("path"), e.get("mode"), e.get("type")
+            if not _tree_path_ok(path):
+                return self._error(422, "tree.path contains a malformed path component")
+            if mode not in TREE_MODES or kind != TREE_MODES[mode]:
+                return self._error(422, "Invalid tree info")
+            if kind != "blob":
+                return self._error(422, "mock: only blob entries are supported")
+            if ("content" in e) == ("sha" in e):
+                return self._error(422, "Must supply either tree.sha or tree.content")
+            if "content" in e:
+                if not isinstance(e["content"], str):
+                    return self._error(422, "Invalid tree info")
+                files[path] = e["content"].encode("utf-8", "surrogatepass")
+            elif e["sha"] is None:
+                files.pop(path, None)
+            elif e["sha"] in mock.blobs:
+                files[path] = mock.blobs[e["sha"]]
+            else:
+                return self._error(422, "tree.sha %s is not a valid blob" % e["sha"])
+        try:
+            sha = mock._store_tree(files)
+        except ValueError:
+            return self._error(422, "Invalid tree info")
+        listing = []
+        for name, mode, kind, obj in mock.trees[sha]["entries"]:
+            item = {"path": name, "mode": mode, "type": kind, "sha": obj}
+            if kind == "blob":
+                item["size"] = len(mock.blobs[obj])
+                item["url"] = self._api_url("/git/blobs/" + obj)
+            else:
+                item["url"] = self._api_url("/git/trees/" + obj)
+            listing.append(item)
+        return self._json(201, {"sha": sha, "url": self._api_url("/git/trees/" + sha), "tree": listing,
+                                "truncated": False})
+
+    def _create_commit(self, body):
+        mock = self.mock
+        req = self._json_body(body)
+        if req is None:
+            return
+        message, tree, parents = req.get("message"), req.get("tree"), req.get("parents", [])
+        if not isinstance(message, str):
+            return self._error(422, "Invalid request.\n\n\"message\" wasn't supplied.")
+        if not isinstance(tree, str):
+            return self._error(422, "Invalid request.\n\n\"tree\" wasn't supplied.")
+        if tree not in mock.trees:
+            return self._error(422, "Tree SHA does not exist")
+        if not isinstance(parents, list) or not all(isinstance(p, str) and p in mock._by_sha for p in parents):
+            return self._error(422, "Parent SHA does not exist or is not a commit object")
+        sha = mock._new_commit(None, dict(mock.trees[tree]["files"]), message, parents=parents)
+        c = mock._by_sha[sha]
+        person = {"name": "mock", "email": "mock@example.com", "date": c["date"]}
+        return self._json(201, {
+            "sha": sha,
+            "node_id": "C_" + sha[:12],
+            "url": self._api_url("/git/commits/" + sha),
+            "html_url": "https://github.com/%s/%s/commit/%s" % (mock.owner, mock.name, sha),
+            "author": person,
+            "committer": person,
+            "tree": {"sha": c["tree"], "url": self._api_url("/git/trees/" + c["tree"])},
+            "message": message,
+            "parents": [{"sha": p, "url": self._api_url("/git/commits/" + p),
+                         "html_url": "https://github.com/%s/%s/commit/%s" % (mock.owner, mock.name, p)}
+                        for p in parents],
+            "verification": {"verified": False, "reason": "unsigned", "signature": None, "payload": None},
+        })
 
     # ---- control endpoints --------------------------------------------- #
     def _control(self, method, path, query, body):
@@ -599,10 +829,12 @@ def main(argv=None):
     ap.add_argument("--path", default="board.json")
     ap.add_argument("--private", action="store_true")
     ap.add_argument("--no-data-branch", action="store_true", help="start without the data branch")
+    ap.add_argument("--empty", action="store_true", help="start as an empty repo (no commits at all)")
     ap.add_argument("--seed", help="file whose text becomes <branch>/<path> at start")
     args = ap.parse_args(argv)
     mock = MockGitHub(repo=args.repo, token=args.token, private=args.private, data_branch=args.branch,
-                      create_data_branch=not args.no_data_branch, host=args.host, port=args.port)
+                      create_data_branch=not args.no_data_branch, host=args.host, port=args.port,
+                      empty=args.empty)
     if args.seed:
         with open(os.path.expanduser(args.seed), encoding="utf-8") as f:
             mock.set_file_text(args.branch, args.path, f.read(), "seed")
