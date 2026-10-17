@@ -29,8 +29,11 @@ const jsonRes = (status, obj, headers = {}) =>
   new Response(JSON.stringify(obj), { status, headers: Object.assign({ "content-type": "application/json" }, headers) });
 
 class FakeGitHub {
-  constructor({ repo = REPO, token = TOKEN, isPrivate = false, dataBranch = true, defaultBranch = "main", push = true } = {}) {
+  constructor({ repo = REPO, token = TOKEN, isPrivate = false, dataBranch = true, defaultBranch = "main", push = true, empty = false } = {}) {
     this.repo = repo;
+    this.empty = empty; // a brand-new repo with no commits: the Git database API answers 409
+    this.trees = new Map(); // tree sha -> Map(path -> text), from POST git/trees
+    this.made = new Map(); // commit sha -> {tree, parents, message}, from POST git/commits
     this.token = token;
     this.isPrivate = isPrivate;
     this.push = push;
@@ -42,8 +45,8 @@ class FakeGitHub {
     this.hooks = []; // {method, contains, fn}
     this.override = null; // entry => Response | "offline" | null, for EVERY request (after the one-shot hooks)
     this.offline = false;
-    this._mkBranch(defaultBranch, new Map([["README.md", "# Lab Hub\n"]]));
-    if (dataBranch) this._mkBranch("data", new Map([["README.md", "# Lab Hub\n"]]));
+    if (!empty) this._mkBranch(defaultBranch, new Map([["README.md", "# Lab Hub\n"]]));
+    if (dataBranch && !empty) this._mkBranch("data", new Map([["README.md", "# Lab Hub\n"]]));
     this.fetch = this.fetch.bind(this);
   }
 
@@ -191,15 +194,41 @@ class FakeGitHub {
       if (!this.heads.has(name)) return jsonRes(404, { message: "Not Found" });
       return jsonRes(200, { ref: `refs/heads/${name}`, object: { sha: this.heads.get(name), type: "commit" } });
     }
+    if (rest.startsWith("/git/") && method === "POST") {
+      if (auth !== "ok" || !this.push) return jsonRes(403, { message: "Resource not accessible by personal access token" });
+      if (this.empty) return jsonRes(409, { message: "Git Repository is empty." });
+    }
+    if (rest === "/git/trees" && method === "POST") {
+      const req = JSON.parse(body);
+      if (!Array.isArray(req.tree)) return jsonRes(422, { message: "Invalid tree info" });
+      const files = req.base_tree ? new Map(this.trees.get(req.base_tree) || []) : new Map();
+      for (const e of req.tree) files.set(e.path, e.content);
+      const sha = crypto.createHash("sha1").update(JSON.stringify([...files])).digest("hex");
+      this.trees.set(sha, files);
+      return jsonRes(201, { sha, tree: [...files.keys()].map((p) => ({ path: p, mode: "100644", type: "blob" })) });
+    }
+    if (rest === "/git/commits" && method === "POST") {
+      const req = JSON.parse(body);
+      if (!this.trees.has(req.tree)) return jsonRes(422, { message: "Tree SHA does not exist" });
+      const sha = crypto.randomBytes(20).toString("hex");
+      this.made.set(sha, { tree: req.tree, parents: req.parents || [], message: req.message });
+      return jsonRes(201, { sha, tree: { sha: req.tree }, parents: (req.parents || []).map((p) => ({ sha: p })), message: req.message });
+    }
     if (rest === "/git/refs" && method === "POST") {
       const req = JSON.parse(body);
       const name = String(req.ref || "").replace(/^refs\/heads\//, "");
       if (this.branches.has(name)) return jsonRes(422, { message: "Reference already exists" });
-      const from = [...this.heads.entries()].find(([, sha]) => sha === req.sha);
-      if (!from) return jsonRes(422, { message: "Object does not exist" });
-      this.branches.set(name, new Map(this.branches.get(from[0])));
+      const made = this.made.get(req.sha);
+      if (made) {
+        this.branches.set(name, new Map(this.trees.get(made.tree)));
+        this.commits.push({ branch: name, message: made.message, path: [...this.trees.get(made.tree).keys()].join(",") });
+      } else {
+        const from = [...this.heads.entries()].find(([, sha]) => sha === req.sha);
+        if (!from) return jsonRes(422, { message: "Object does not exist" });
+        this.branches.set(name, new Map(this.branches.get(from[0])));
+      }
       this.heads.set(name, req.sha);
-      return jsonRes(201, { ref: req.ref, object: { sha: req.sha } });
+      return jsonRes(201, { ref: req.ref, object: { sha: req.sha, type: "commit" } });
     }
     return jsonRes(404, { message: "Not Found" });
   }
@@ -263,19 +292,49 @@ describe("GitHubSource", () => {
     assert.deepEqual(titles(src.board), ["A"]);
   });
 
-  test("branch auto-create from the default branch", async () => {
+  test("a missing branch is created as an orphan holding only board.json", async () => {
     const fake = new FakeGitHub({ dataBranch: false });
     const src = makeSource(fake);
     await src.submit(addTask("t-1", "First task"));
     const sync = await src.syncNow();
     assert.equal(sync.state, "ok", sync.last_error);
     assert.ok(fake.branches.has("data"));
-    assert.equal(fake.getFile("data", "README.md"), "# Lab Hub\n", "branch starts from main");
+    assert.deepEqual([...fake.branches.get("data").keys()], ["board.json"], "no copy of main's files");
+    const treeReq = JSON.parse(fake.log.find((r) => r.method === "POST" && r.path.endsWith("/git/trees")).body);
+    assert.equal("base_tree" in treeReq, false);
+    assert.deepEqual(treeReq.tree.map((e) => [e.path, e.mode, e.type]), [["board.json", "100644", "blob"]]);
+    const commitReq = JSON.parse(fake.log.find((r) => r.method === "POST" && r.path.endsWith("/git/commits")).body);
+    assert.deepEqual(commitReq.parents, []);
+    assert.match(commitReq.message, /^test: create board\.json/);
     assert.equal(fake.count("POST", "/git/refs", 201), 1);
-    assert.equal(fake.count("GET", "/git/ref/heads/main", 200), 1);
+    assert.equal(fake.count("GET", "/git/ref/"), 0, "the default branch is never read");
     assert.deepEqual(titles(fake.getBoard()), ["First task"]);
     assert.equal(fake.getFile("main", "board.json"), undefined, "main is untouched");
     assert.equal(sync.pending, 0);
+  });
+
+  test("an empty repo (no commits) -> 'push the code first', ops kept", async () => {
+    const fake = new FakeGitHub({ empty: true, dataBranch: false });
+    const src = makeSource(fake);
+    await src.submit(addTask("t-1", "First task"));
+    const sync = await src.syncNow();
+    assert.equal(sync.state, "error");
+    assert.match(sync.last_error, /no commits yet - push the Lab Hub code to it first/);
+    assert.equal(sync.pending, 1);
+    assert.equal(fake.count("POST", "/git/refs"), 0);
+  });
+
+  test("a branch someone else created meanwhile (422 already exists) is used", async () => {
+    const fake = new FakeGitHub({ dataBranch: false });
+    fake.onNext("POST", "/git/refs", () => {
+      fake.setFile("data", "board.json", B.serializeBoard(B.normalizeBoard({ tasks: [task("t-pi", "From the Pi")] })), "pi");
+      return jsonRes(422, { message: "Reference already exists" });
+    });
+    const src = makeSource(fake);
+    await src.submit(addTask("t-1", "First task"));
+    const sync = await src.syncNow();
+    assert.equal(sync.state, "ok", sync.last_error);
+    assert.deepEqual(titles(fake.getBoard()).sort(), ["First task", "From the Pi"]);
   });
 
   test("two-way merge with a concurrent writer (the Pi)", async () => {

@@ -1618,28 +1618,44 @@ export class GitHubSource {
     return this._errorOf(res, data, "write");
   }
 
-  // Create the data branch from the default branch.
+  // Create the missing data branch as an ORPHAN, like the Pi
+  // (github_sync._create_branch): one root commit whose tree holds only the
+  // board file (an empty board), so the code on main is never copied into it.
+  // The cycle then fetches it, replays the queue and PUTs with its sha.
   // Returns {created} | {exists} | {offline} | {error, retryAt}.
   async _createBranch() {
     const api = this._repoUrl();
-    const branch = this._s.branch;
+    const { branch, path } = this._s;
+    const who = cleanString(this._s.clientName, LIMITS.by) || "web";
+    const empty = `the GitHub repo has no commits yet - push the Lab Hub code to it first, then the '${branch}' branch is created on the next sync`;
+    const denied = `GitHub refused to create the "${branch}" branch — check the token has Contents: read & write on ${this._s.repo}`;
+    // POST one git object; returns its sha or a cycle result to bail out with.
+    const create = async (what, url, body) => {
+      const { res, data } = await this._request("POST", url, body);
+      if (res.status === 409) return { fail: { error: empty } }; // "Git Repository is empty."
+      if (res.status === 404) return { fail: { error: denied } };
+      if (!res.ok) return { fail: this._errorOf(res, data, "write") };
+      const sha = data && typeof data.sha === "string" && data.sha ? data.sha : null;
+      return sha ? { sha } : { fail: { error: `GitHub sent an unexpected reply while creating the ${what}` } };
+    };
     try {
-      const { res: repoRes, data: repo } = await this._request("GET", api);
-      if (repoRes.status === 404) return { error: "repo not found, or the token can't see it" };
-      if (!repoRes.ok) return this._errorOf(repoRes, repo, "read");
-      const def = repo && typeof repo.default_branch === "string" ? repo.default_branch : "main";
-      if (def === branch) return { exists: true };
-      const { res: refRes, data: ref } = await this._request("GET", `${api}/git/ref/heads/${encSegments(def)}`);
-      if (refRes.status === 404 || refRes.status === 409) {
-        return { error: `Can't create the "${branch}" branch: "${def}" has no commits yet (push the code first)` };
-      }
-      if (!refRes.ok) return this._errorOf(refRes, ref, "read");
-      const sha = ref && ref.object && typeof ref.object.sha === "string" ? ref.object.sha : null;
-      if (!sha) return { error: `GitHub sent an unexpected reply for branch "${def}"` };
-      const { res: postRes, data } = await this._request("POST", `${api}/git/refs`, { ref: `refs/heads/${branch}`, sha });
+      const doc = Object.assign(emptyBoard(), { updated_at: nowIso(), updated_by: who });
+      const tree = await create("tree", `${api}/git/trees`, {
+        tree: [{ path, mode: "100644", type: "blob", content: serializeBoard(doc) }],
+      });
+      if (tree.fail) return tree.fail;
+      const commit = await create("commit", `${api}/git/commits`, {
+        message: `${who}: create ${path}\n\nNew orphan branch '${branch}' holding only ${path} (no code history).`,
+        tree: tree.sha,
+        parents: [],
+      });
+      if (commit.fail) return commit.fail;
+      const { res: postRes, data } = await this._request("POST", `${api}/git/refs`, { ref: `refs/heads/${branch}`, sha: commit.sha });
       if (postRes.ok) return { created: true };
       const msg = data && typeof data.message === "string" ? data.message : "";
-      if (postRes.status === 422 && /already exists/i.test(msg)) return { exists: true };
+      if (postRes.status === 422 && /already exists/i.test(msg)) return { exists: true }; // someone beat us to it
+      if (postRes.status === 409) return { error: empty };
+      if (postRes.status === 404) return { error: denied };
       if (postRes.status === 422) return { error: `Couldn't create branch "${branch}": ${msg || "rejected"}` };
       return this._errorOf(postRes, data, "write");
     } catch (_) {
