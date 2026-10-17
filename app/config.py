@@ -61,7 +61,9 @@ INT_KEYS = {
 }
 
 THEMES = ("dark", "light", "auto")
-_REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
+_REPO_RE = re.compile(r"[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}")
+_PART_RE = re.compile(r"[A-Za-z0-9._-]+")  # one part of a branch name or file path
+_DOTS_RE = re.compile(r"\.+")
 _SECRET_KEYS = ("github_token",)
 
 
@@ -72,11 +74,52 @@ def _resolve_path(p, base_dir):
     return p if os.path.isabs(p) else os.path.abspath(os.path.join(base_dir, p))
 
 
+# The repo, branch and path end up in GitHub API URLs; these rules match
+# githubSettingsError() in static/js/sources.js. A "." or ".." part would walk
+# the URL out of /repos/<repo>/contents/.
+def repo_ok(value):
+    """'owner/name' made of [A-Za-z0-9._-], with no part that is only dots."""
+    return (
+        isinstance(value, str)
+        and bool(_REPO_RE.fullmatch(value))
+        and not any(_DOTS_RE.fullmatch(p) for p in value.split("/"))
+    )
+
+
+def path_ok(value):
+    """A file path: parts of [A-Za-z0-9._-] joined by single '/', none of them
+    only dots."""
+    if not isinstance(value, str) or not value or len(value) > 1024:
+        return False
+    return all(_PART_RE.fullmatch(p) and not _DOTS_RE.fullmatch(p) for p in value.split("/"))
+
+
+def branch_ok(value):
+    """A branch name: a valid path that also follows git's ref rules (no '..',
+    no part starting with '.' or ending with '.' or '.lock')."""
+    if not path_ok(value) or len(value) > 255 or ".." in value:
+        return False
+    return all(
+        not p.startswith(".") and not p.endswith(".") and not p.lower().endswith(".lock")
+        for p in value.split("/")
+    )
+
+
+def _shown(value, limit=80):
+    """``value`` quoted for an error message: printable, and not too long."""
+    s = "".join(ch if ch.isprintable() else "?" for ch in str(value))
+    if len(s) > limit:
+        s = s[:limit] + "..."
+    return "'%s'" % s
+
+
 def _normalize_repo(value):
-    """Accept 'owner/name', 'https://github.com/owner/name(.git)', 'git@github.com:owner/name.git'."""
+    """Accept 'owner/name', 'https://github.com/owner/name(.git)',
+    'git@github.com:owner/name.git'. Returns (repo, error): ('', None) when
+    empty, ('', message) when it can't be used."""
     s = (value or "").strip()
     if not s:
-        return ""
+        return "", None
     for prefix in ("https://github.com/", "http://github.com/", "git@github.com:", "github.com/"):
         if s.lower().startswith(prefix):
             s = s[len(prefix):]
@@ -84,10 +127,26 @@ def _normalize_repo(value):
     s = s.strip("/")
     if s.endswith(".git"):
         s = s[:-4]
-    if not _REPO_RE.fullmatch(s):
-        log.warning("github_repo %r is not 'owner/name'; GitHub sync is off", value)
-        return ""
-    return s
+    if not repo_ok(s):
+        return "", "github_repo %s is not a valid repository (use owner/name, e.g. richard-0417/lab-hub)" % _shown(
+            value
+        )
+    return s, None
+
+
+def _github_error(cfg, repo_value):
+    """Check github_repo / github_branch / github_path. Sets cfg['github_repo']
+    and returns '' when they are usable, else a message for the sync status."""
+    repo, repo_error = _normalize_repo(repo_value)
+    cfg["github_repo"] = repo
+    if not repo_value:
+        return ""  # local-only: the branch and path are never used
+    errors = [repo_error] if repo_error else []
+    if not branch_ok(cfg["github_branch"]):
+        errors.append("github_branch %s is not a valid branch name" % _shown(cfg["github_branch"]))
+    if not path_ok(cfg["github_path"]):
+        errors.append("github_path %s is not a valid file path" % _shown(cfg["github_path"]))
+    return "; ".join("config: " + e for e in errors)
 
 
 def _derive_pages_url(repo, code_repo=""):
@@ -150,7 +209,7 @@ def _github_slug(url):
     path = path.strip("/")
     if path.endswith(".git"):
         path = path[:-4]
-    return path if _REPO_RE.fullmatch(path) else ""
+    return path if repo_ok(path) else ""
 
 
 def git_origin_repo(repo_dir):
@@ -256,9 +315,13 @@ def load_config(base_dir=None, config_path=None, environ=None):
     cfg["client_name"] = " ".join(cfg["client_name"].split())[:60] or DEFAULTS["client_name"]
     cfg["host"] = cfg["host"] or DEFAULTS["host"]
     cfg["theme"] = cfg["theme"].lower() if cfg["theme"].lower() in THEMES else DEFAULTS["theme"]
-    cfg["github_repo"] = _normalize_repo(cfg["github_repo"])
     cfg["github_branch"] = cfg["github_branch"] or DEFAULTS["github_branch"]
     cfg["github_path"] = cfg["github_path"].strip("/") or DEFAULTS["github_path"]
+    # An unusable repo, branch or path turns sync off (never stops the server);
+    # the reason is shown by /api/config and /api/sync (see github_config_error).
+    cfg["github_error"] = _github_error(cfg, cfg["github_repo"])
+    if cfg["github_error"]:
+        log.warning("%s; GitHub sync is off", cfg["github_error"])
     cfg["github_api"] = (cfg["github_api"] or DEFAULTS["github_api"]).rstrip("/")
     if not cfg["pages_url"] and cfg["github_repo"]:
         cfg["pages_url"] = _derive_pages_url(cfg["github_repo"], git_origin_repo(base_dir))
@@ -272,9 +335,17 @@ def load_config(base_dir=None, config_path=None, environ=None):
     return cfg
 
 
+def github_config_error(cfg):
+    """Why the configured GitHub repo / branch / path can't be used, e.g.
+    "config: github_branch 'x..y' is not a valid branch name"; '' when they
+    can (or when no repo is configured)."""
+    return cfg.get("github_error") or ""
+
+
 def github_enabled(cfg):
-    """GitHub sync runs only when both a repo and a token are configured."""
-    return bool(cfg.get("github_repo")) and bool(cfg.get("github_token"))
+    """GitHub sync runs only when both a repo and a token are configured, and
+    the repo, branch and path are usable."""
+    return bool(cfg.get("github_repo")) and bool(cfg.get("github_token")) and not github_config_error(cfg)
 
 
 def redacted(cfg):

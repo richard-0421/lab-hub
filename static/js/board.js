@@ -434,6 +434,10 @@ export function applyOp(board, op) {
     if (idx !== -1) return board;
     const item = normalizeItem(coll, op.item, list.length, ts);
     if (!item) return board;
+    // A full collection takes no more items (app/board.py _apply_in_place):
+    // appending would push a file that normalization later truncates,
+    // silently deleting whichever existing item sorts last.
+    if (list.length >= LIMITS.maxItems) return board;
     next = list.concat([item]);
   } else if (op.op === "update") {
     if (idx === -1) return board;
@@ -454,6 +458,42 @@ export function applyOps(board, ops) {
   let b = board;
   for (const op of ops || []) b = applyOp(b, op);
   return b;
+}
+
+/** The message for an `add` into a full collection (same text as app/store.py). */
+export function boardFullMessage(coll) {
+  return `board full: ${coll} already has ${LIMITS.maxItems} items - delete some first (e.g. clear done tasks)`;
+}
+
+/**
+ * Would applying `ops` (already validated) on top of `board` add an item to a
+ * collection that already holds LIMITS.maxItems items? Mirrors app/store.py
+ * Store._check_room: counts the board's items plus the adds and deletes
+ * earlier in the same batch; an add whose id already exists is a no-op and
+ * doesn't count. Returns null, or {index, error} for the first add that
+ * doesn't fit (applyOp would silently drop it).
+ */
+export function checkRoom(board, ops) {
+  const ids = {};
+  for (const coll of COLLECTIONS) {
+    const list = board && Array.isArray(board[coll]) ? board[coll] : [];
+    ids[coll] = new Set(list.map((it) => it && it.id));
+  }
+  const list = ops || [];
+  for (let i = 0; i < list.length; i++) {
+    const op = list[i];
+    if (!isPlainObject(op) || !hasOwn(ids, op.coll)) continue;
+    const have = ids[op.coll];
+    if (op.op === "add") {
+      const id = isPlainObject(op.item) ? op.item.id : undefined;
+      if (have.has(id)) continue;
+      if (have.size >= LIMITS.maxItems) return { index: i, error: boardFullMessage(op.coll) };
+      have.add(id);
+    } else if (op.op === "delete") {
+      have.delete(op.id);
+    }
+  }
+  return null;
 }
 
 // ------------------------------------------------------------ serialization

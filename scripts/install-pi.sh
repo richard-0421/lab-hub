@@ -2,14 +2,16 @@
 # One-shot Raspberry Pi setup for Lab Hub. Safe to re-run any time (e.g. to
 # change the token or calendar, or after moving the folder).
 #
-# Run as your normal desktop user (NOT with sudo) from inside the cloned repo:
-#   git clone https://github.com/richard-0417/lab-hub.git ~/lab-hub
+# Run as your normal desktop user (NOT with sudo) from inside the cloned repo
+# (public, so no login; --single-branch skips the board's history on "data"):
+#   git clone --single-branch https://github.com/richard-0417/lab-hub.git ~/lab-hub
 #   cd ~/lab-hub && ./scripts/install-pi.sh
 #
 # Options:
-#   --repo OWNER/NAME   GitHub DATA repo holding board.json (default
-#                       richard-0417/lab-hub-data; "none" = local-only, no sync).
-#                       Not the code repo: the Pi pulls code anonymously.
+#   --repo OWNER/NAME   GitHub repo whose "data" branch holds board.json
+#                       (default richard-0417/lab-hub, the same repo as the
+#                       code; "none" = local-only, no sync). A separate data
+#                       repo is an optional alternative (README).
 #   --name TEXT         dashboard title (default "Lab Hub")
 #   --ics URL           published Outlook calendar .ics URL ("none" clears it)
 #   --token-file FILE   read the GitHub token from FILE instead of prompting
@@ -22,7 +24,7 @@
 #   -h, --help          show this help
 #
 # What it does: checks prerequisites, makes .venv and installs requirements,
-# writes config.json (mode 600) and checks the token can write the data repo,
+# writes config.json (mode 600) and checks the token can write the board repo,
 # installs + starts lab-hub.service and the lab-hub-update.timer auto-updater
 # (a root-owned copy of scripts/update.sh in /usr/local/lib/lab-hub), sets up
 # kiosk autostart (X11, wayfire, labwc), then waits for http://localhost:<port>
@@ -109,8 +111,8 @@ if git -C "$APP_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if ORIGIN="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null)"; then
     case "$ORIGIN" in
       http://*@*|https://*@*)
-        # The Pi only pulls the public code repo; it must not hold a credential
-        # that can push code (that would be root on this Pi via the updater).
+        # The Pi pulls the public repo anonymously; a credential saved in the
+        # remote URL is never needed and sits in .git/config in clear text.
         warn "the 'origin' URL contains a login or token. The Pi only needs to pull, anonymously:"
         warn "  git -C \"$APP_DIR\" remote set-url origin https://github.com/richard-0417/lab-hub.git" ;;
     esac
@@ -196,16 +198,15 @@ NAME="$(printf '%s' "$NAME" | tr -d '\r\n')"
 if [ "$OPT_REPO_SET" = 1 ]; then REPO="$OPT_REPO"
 else
   if [ "$INTERACTIVE" = 1 ]; then
-    info "GitHub DATA repo that holds board.json, e.g. richard-0417/lab-hub-data. Not the"
-    info "code repo lab-hub: tokens get access to the data repo only. ('none' = keep the"
-    info "board on this Pi only)"
+    info "GitHub repo whose 'data' branch holds board.json: normally this code repo,"
+    info "richard-0417/lab-hub. ('none' = keep the board on this Pi only)"
   fi
-  ask REPO "GitHub data repo (owner/name)" "$CUR_REPO"
+  ask REPO "GitHub repo for the board (owner/name)" "$CUR_REPO"
 fi
 case "$REPO" in none|NONE|-|"") REPO="" ;; esac
 REPO="${REPO#https://github.com/}"; REPO="${REPO%.git}"; REPO="${REPO%/}"
 if [ -n "$REPO" ] && ! printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'; then
-  die "'$REPO' doesn't look like owner/name (e.g. richard-0417/lab-hub-data)."
+  die "'$REPO' doesn't look like owner/name (e.g. richard-0417/lab-hub)."
 fi
 
 if [ "$OPT_ICS_SET" = 1 ]; then ICS="$OPT_ICS"
@@ -222,9 +223,9 @@ if [ -n "$TOKEN_FILE" ]; then
   [ -n "$NEW_TOKEN" ] || die "--token-file $TOKEN_FILE is empty."
   TOKEN_ACTION="set"
 elif [ "$INTERACTIVE" = 1 ] && [ -n "$REPO" ]; then
-  info "A fine-grained GitHub token with Contents: Read and write on $REPO (and on no"
-  info "other repo) lets this Pi sync. Create one at"
-  info "https://github.com/settings/personal-access-tokens/new (see README, step 4)."
+  info "A fine-grained GitHub token with Contents: Read and write on $REPO only"
+  info "lets this Pi sync. Create one at"
+  info "https://github.com/settings/personal-access-tokens/new (see the README)."
   if [ "$HAS_TOKEN" = 1 ]; then
     prompt="    GitHub token (hidden; Enter = keep the saved one, '-' = remove): "
   else
@@ -259,8 +260,9 @@ else
   case "$token_state" in
     set|saved) info "token: $token_state"
                # Tests read AND write access (a read-only token, or one without
-               # this repo, can still read a public repo) and warns if the token
-               # could also change the code repo.
+               # this repo, can still read a public repo) and that the board
+               # branch exists. Single repo: one NOTE on the trust model. A
+               # separate data repo: warns if the token can also write the code.
                cfg_py check 2>&1 | while IFS= read -r line; do
                  case "$line" in
                    OK:*)               ok "$line" ;;
@@ -499,9 +501,10 @@ else
   info "Start it by hand with: ./run.sh   (then open http://localhost:$PORT)"
 fi
 
-# Pages site: published from the code repo (origin); the board lives in the
-# data repo. "write" above stored this address as pages_url (with ?repo=<data
-# repo>) so the kiosk footer shows the same one.
+# Pages site: published from the code repo (origin). Normally the board is in
+# that same repo, so this is the plain https://<owner>.github.io/<repo>/ the
+# server derives too; only with a separate data repo did "write" above store
+# it as pages_url with ?repo=<data repo>, so the kiosk footer shows the same.
 if [ -n "$REPO" ]; then
   PAGES="$(cfg_py pages 2>/dev/null || true)"
   [ -z "$PAGES" ] || info "From anywhere:      $PAGES   (paste a token there once)"

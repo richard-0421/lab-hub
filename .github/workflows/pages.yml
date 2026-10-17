@@ -2,9 +2,9 @@
 #   https://richard-0417.github.io/lab-hub/
 #
 # Runs on pushes to main that touch static/ or this file, or by hand from the
-# Actions tab ("Run workflow"). Board data lives in a separate data repo
-# (richard-0417/lab-hub-data), so the commits the Pi and browsers make there
-# never trigger a deploy.
+# Actions tab ("Run workflow"). The board lives on the orphan "data" branch
+# (board.json only, no workflow files), so the commits the Pi and browsers
+# make there never trigger a deploy.
 #
 # One-time setup: repo Settings -> Pages -> Build and deployment ->
 # Source: "GitHub Actions".

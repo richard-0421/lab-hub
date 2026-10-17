@@ -1125,3 +1125,53 @@ describe("GitHubSource: settings that would leave /repos/<repo>/contents/", () =
     }
   });
 });
+
+// ------------------------------------------------------------ 2000-item cap
+
+describe("GitHubSource: the 2000-item cap", () => {
+  const MAX = B.LIMITS.maxItems;
+  const many = (n, from = 0) => Array.from({ length: n }, (_, i) => task(`t${String(from + i).padStart(4, "0")}`, "x", { rank: from + i }));
+  const FULL_MSG = "board full: tasks already has 2000 items - delete some first (e.g. clear done tasks)";
+
+  test("an add into a full collection is refused before anything is queued or stored", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: many(MAX) });
+    const storage = memStorage();
+    const src = makeSource(fake, { storage });
+    await src.syncNow();
+    const stored = storage.getItem(githubCacheKey(settings()));
+    const err = await src.submit(addTask("t-new", "New")).then(() => null, (e) => e);
+    assert.ok(err, "rejected");
+    assert.equal(err.message, FULL_MSG);
+    assert.equal(err.index, 0);
+    assert.equal(src.sync.pending, 0);
+    assert.equal(src.board.tasks.length, MAX);
+    assert.equal(storage.getItem(githubCacheKey(settings())), stored, "nothing persisted");
+    // a delete earlier in the same batch makes room; adds earlier in the batch count
+    await assert.rejects(src.submit([{ op: "delete", coll: "tasks", id: "t0000", ts: TS }, addTask("t-a", "A"), addTask("t-b", "B")]), { message: FULL_MSG });
+    assert.equal(src.sync.pending, 0);
+    await src.submit([{ op: "delete", coll: "tasks", id: "t0000", ts: TS }, addTask("t-a", "A", { rank: -1 })]);
+    await src.syncNow();
+    const remote = fake.getBoard();
+    assert.equal(remote.tasks.length, MAX);
+    assert.equal(remote.tasks[0].id, "t-a");
+  });
+
+  test("never pushes a 2001-item file: an add that no longer fits after a rebase is dropped, not committed", async () => {
+    const fake = new FakeGitHub();
+    seedBoard(fake, { tasks: many(MAX - 1) });
+    const src = makeSource(fake);
+    await src.syncNow();
+    await src.submit(addTask("t-mine", "Mine", { rank: 1e6 })); // fits locally: 2000
+    // meanwhile the Pi fills the last slot on GitHub
+    seedBoard(fake, { tasks: many(MAX - 1).concat([task("t-pi", "Pi's", { rank: -5 })]) });
+    const commits = fake.commits.length;
+    const sync = await src.syncNow();
+    assert.equal(sync.pending, 0);
+    const remote = fake.getBoard();
+    assert.equal(remote.tasks.length, MAX, "the file on GitHub never holds more than 2000 items");
+    assert.ok(remote.tasks.some((t) => t.id === "t-pi"), "nobody else's item was truncated away");
+    assert.equal(fake.commits.length, commits, "a batch that changes nothing makes no commit");
+    assert.equal(src.board.tasks.length, MAX);
+  });
+});

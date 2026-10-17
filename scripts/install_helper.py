@@ -14,7 +14,11 @@ command line. Nothing here ever prints the token.
   port    "port" from config.json (8000 if unset)
   pages   the GitHub Pages address to print for LH_ORIGIN + the saved board repo
   check   test the saved token against GitHub: can it read AND write the board
-          repo, and can it (wrongly) write the code repo that LH_ORIGIN names?
+          repo, does the board branch exist yet, and (only when the board is in
+          a separate data repo) can it also write the code repo LH_ORIGIN names?
+
+The normal setup keeps code and board in ONE repo (richard-0417/lab-hub: main
+= code, data = board.json); a separate data repo is an optional alternative.
 
 Other inputs: LH_APP_DIR (the install folder, default: this file's parent's
 parent), LH_OLD_DIR (for olddb / defaults), LABHUB_GITHUB_TOKEN (overrides
@@ -26,7 +30,8 @@ import re
 import sys
 import tempfile
 
-DEFAULT_REPO = "richard-0417/lab-hub-data"
+DEFAULT_REPO = "richard-0417/lab-hub"
+DEFAULT_BRANCH = "data"
 # keys of the old pFLARES-tracker dashboard that no longer mean anything
 OBSOLETE = ("data_dir", "csv_glob", "monitor_points", "stale_seconds",
             "tracker_cmd", "tracker_display", "tracker_log")
@@ -90,11 +95,12 @@ def pages_base(repo):
 def pages_urls(origin, board_repo):
     """-> (address to print, value for config.json "pages_url").
 
-    The Pages site is published from the CODE repo (the git origin). When the
-    board lives in a different repo, the server can't work the address out
-    from github_repo, so it is stored explicitly, with ?repo=<board repo> so a
-    new browser's connect dialog is pre-filled with the right repo. When both
-    are the same repo the stored value is "" (the server derives it).
+    The Pages site is published from the CODE repo (the git origin). In the
+    normal single-repo setup the board is in that same repo, so the stored
+    value is "" (the server derives https://<owner>.github.io/<repo>/). Only
+    when the board lives in a separate data repo is the address stored
+    explicitly, with ?repo=<board repo> so a new browser's connect dialog is
+    pre-filled with the right repo.
     """
     code = code_repo_from_origin(origin)
     if code:
@@ -184,7 +190,11 @@ def probe_write(api, token, repo):
 
 
 def check(cur, origin):
-    """Print OK / PROBLEM / WARNING / NOTE lines about the saved token."""
+    """Print OK / PROBLEM / WARNING / NOTE lines about the saved token.
+
+    WARNING is only for the optional two-repo setup (a data-repo token that can
+    also write the code repo). In the normal single-repo setup a token that can
+    write the board can push code too; that gets one plain NOTE."""
     repo = s(cur, "github_repo")
     token = os.environ.get("LABHUB_GITHUB_TOKEN") or s(cur, "github_token")
     token = "".join(token.split())
@@ -223,34 +233,66 @@ def check(cur, origin):
               "'Only select repositories' must include %s, and Repository permissions "
               "-> Contents must be 'Read and write'." % (repo, repo.split("/", 1)[1]))
     elif can == "empty":
-        print("PROBLEM: %s has no commits yet. Push the data branch to it first "
-              "(README: One-time GitHub setup, step 2)." % repo)
+        print("PROBLEM: %s has no commits yet. Push the code and the data branch to it "
+              "first (README: One-time GitHub setup)." % repo)
+        return
     else:
         print("NOTE: the token can read %s (%s repo), but write access could not be "
               "confirmed (%s). If the sync pill turns red later, check the token has "
               "Contents: Read and write." % (repo, vis, can.split(": ", 1)[-1]))
 
-    # The board repo must not be the code repo the Pi runs: whoever can write
-    # the code can run anything on this Pi (as root, via the updater) and can
-    # change the Pages site that holds everyone's tokens.
     code = code_repo_from_origin(origin)
+    single = bool(code) and code.lower() == repo.lower()
+    check_branch(api, token, repo, s(cur, "github_branch") or DEFAULT_BRANCH,
+                 body.get("default_branch") or "main", single)
+
     if not code:
         return
-    if code.lower() == repo.lower():
-        print("WARNING: the board lives in the code repo %s itself, so every board token can "
-              "also change the code this Pi runs (as root). Move the board to a separate data "
-              "repo (README: One-time GitHub setup)." % code)
+    if single:
+        # The normal setup: one repo, main = code, data = board.json. GitHub
+        # can't limit a token to one branch, so a board token can push to main
+        # too, and the updater installs main. That is the accepted trust
+        # model; say it once, plainly (README: optional hardening).
+        if can == "yes":
+            print("NOTE: Single-repo setup: this token can also push code to %s, which this Pi "
+                  "installs automatically. Only give tokens to people you trust." % repo)
         return
+    # Optional two-repo setup: the point of a separate data repo is that board
+    # tokens can't change the code this Pi runs or the Pages site, so a token
+    # that can still write the code repo defeats it.
     try:
         can_code = probe_write(api, token, code)
     except Exception:  # noqa: BLE001
         return
     if can_code == "yes":
         print("WARNING: this token can also write to the code repo %s. Anyone who has it can "
-              "change the code this Pi runs (as root) and the Pages site. Edit the token so "
-              "'Only select repositories' lists only %s." % (code, repo))
+              "change the code this Pi runs and the Pages site, which defeats the separate "
+              "data repo. Edit the token so 'Only select repositories' lists only %s."
+              % (code, repo))
     elif can_code == "no":
         print("OK: the token can't change the code repo %s (good)" % code)
+
+
+def check_branch(api, token, repo, branch, default_branch, single):
+    """Warn when the board branch doesn't exist yet: the first sync would then
+    create it from the default branch (in a single-repo setup: a copy of the
+    code, which also stops the prepared orphan branch from being pushed)."""
+    from urllib.parse import quote
+
+    try:
+        status, _body, _headers = _gh(api, token, "GET",
+                                      "/repos/%s/git/ref/heads/%s" % (repo, quote(branch, safe="/")))
+    except Exception:  # noqa: BLE001
+        return
+    if status != 404:
+        return
+    if single:
+        print("PROBLEM: %s has no '%s' branch yet. Push it before Lab Hub syncs "
+              "(README: One-time GitHub setup); otherwise the first sync creates it from "
+              "'%s', with a copy of the code in it." % (repo, branch, default_branch))
+    else:
+        print("NOTE: %s has no '%s' branch yet; the first sync creates it from '%s'."
+              % (repo, branch, default_branch))
 
 
 # --------------------------------------------------------------------------- #

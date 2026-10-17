@@ -7,9 +7,14 @@ path also works (handy for testing / offline). Read-only.
 Times are returned as naive *local* ISO strings (what the kiosk shows).
 Recurring events (RRULE) are not expanded - only their first occurrence is
 seen.
+
+An event's end follows RFC 5545: DTEND, else DTSTART + DURATION, else one day
+after an all-day (DATE) start, else the start itself (a timed event without
+an end has no length).
 """
 import logging
 import os
+import re
 import ssl
 import threading
 import time
@@ -103,19 +108,80 @@ def _parse_dt(value, params):
     return None, is_date
 
 
+# RFC 5545 3.3.6: [+-]P<n>W, or [+-]P[<n>D][T[<n>H][<n>M][<n>S]]
+_DURATION_RE = re.compile(
+    r"([+-]?)P(?:(\d+)W|(?=\d|T\d)(?:(\d+)D)?(?:T(?=\d)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)"
+)
+
+
+def parse_duration(value):
+    """RFC 5545 DURATION value -> timedelta, or None when it isn't one."""
+    m = _DURATION_RE.fullmatch((value or "").strip().upper())
+    if not m:
+        return None
+    sign, weeks, days, hours, minutes, seconds = m.groups()
+    try:
+        dur = timedelta(
+            weeks=int(weeks or 0),
+            days=int(days or 0),
+            hours=int(hours or 0),
+            minutes=int(minutes or 0),
+            seconds=int(seconds or 0),
+        )
+    except OverflowError:
+        return None
+    return -dur if sign == "-" else dur
+
+
+def effective_end(start, end=None, duration=None, all_day=False):
+    """RFC 5545 end of an event: DTEND, else DTSTART + DURATION, else one day
+    after an all-day (DATE) start, else the start (a timed event without an end
+    has no length). An end before the start (or, for an all-day event, not
+    after it) counts as missing. None only without a start."""
+    if start is None:
+        return None
+    if end is None and duration is not None:
+        try:
+            end = start + duration
+        except OverflowError:
+            end = None
+    if end is not None and (end > start or (end == start and not all_day)):
+        return end
+    if all_day:
+        try:
+            return start + timedelta(days=1)
+        except OverflowError:
+            return start
+    return start
+
+
 def parse_events(text):
-    """All VEVENTs in ``text`` as dicts {summary, location, start, end, all_day}
-    (start/end are naive local datetimes; end may be None)."""
+    """All VEVENTs in ``text`` as dicts {summary, location, start, end, all_day}.
+    start/end are naive local datetimes; ``end`` is the effective end (see
+    effective_end), None only when DTSTART is missing or unreadable.
+    Properties of components nested in an event (VALARM, ...) are ignored."""
     events = []
     cur = None
+    depth = 0  # components nested inside the current VEVENT
     for line in _unfold(text):
-        if line == "BEGIN:VEVENT":
+        marker = line.strip().upper()
+        if marker == "BEGIN:VEVENT":
+            # (an event that was never closed is dropped, as before)
             cur = {}
-        elif line == "END:VEVENT":
-            if cur is not None:
-                events.append(cur)
+            depth = 0
+        elif cur is None:
+            continue
+        elif marker == "END:VEVENT":
+            cur["end"] = effective_end(
+                cur.get("start"), cur.get("end"), cur.pop("duration", None), bool(cur.get("all_day"))
+            )
+            events.append(cur)
             cur = None
-        elif cur is not None and ":" in line:
+        elif marker.startswith("BEGIN:"):
+            depth += 1
+        elif marker.startswith("END:"):
+            depth = max(0, depth - 1)
+        elif not depth and ":" in line:
             name, _, value = line.partition(":")
             key = name.split(";")[0].upper()
             params = name[len(key):]
@@ -130,6 +196,8 @@ def parse_events(text):
             elif key == "DTEND":
                 dt, _ = _parse_dt(value, params)
                 cur["end"] = dt
+            elif key == "DURATION":
+                cur["duration"] = parse_duration(value)
     return events
 
 
@@ -151,22 +219,22 @@ def get_events(cfg, now=None):
         start = e.get("start")
         if not start:
             return False
-        end = e.get("end")
+        end = e.get("end") or start
         # upcoming, recently started, or still going on (e.g. an all-day event today)
-        return start >= horizon or (end is not None and end > now)
+        return start >= horizon or end > now
 
     upcoming = [e for e in parse_events(text) if keep(e)]
     upcoming.sort(key=lambda e: e["start"])
 
     out = []
     for e in upcoming[: max(0, int(max_events))]:
-        end = e.get("end")
+        end = e.get("end") or e["start"]
         out.append(
             {
                 "summary": e.get("summary") or "(untitled)",
                 "location": e.get("location", ""),
                 "start": e["start"].isoformat(),
-                "end": end.isoformat() if end else None,
+                "end": end.isoformat(),
                 "all_day": bool(e.get("all_day")),
             }
         )

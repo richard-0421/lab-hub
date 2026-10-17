@@ -8,6 +8,11 @@
 //                   Without a token it only reads, from
 //                   raw.githubusercontent.com (no API rate limit per IP).
 //
+// Default layout: ONE public repo, richard-0417/lab-hub — branch `main` holds
+// the code (and is published to Pages), branch `data` holds board.json. So the
+// page's own repo is also the board repo. Repo, branch and path are all
+// settings, so a separate (e.g. private) data repo works too; it is optional.
+//
 // Both implement the same interface:
 //   src.mode, src.canEdit, src.board, src.sync
 //   src.subscribe(fn) -> unsubscribe     fn({board, sync})
@@ -20,6 +25,7 @@ import {
   LIMITS,
   applyOps,
   canonicalTimestamp,
+  checkRoom,
   cleanString,
   emptyBoard,
   normalizeBoard,
@@ -29,7 +35,7 @@ import {
   validateOp,
 } from "./board.js";
 
-export const DEFAULT_REPO = "richard-0417/lab-hub";
+export const DEFAULT_REPO = "richard-0417/lab-hub"; // code on `main`, board on `data`
 export const DEFAULT_BRANCH = "data";
 export const DEFAULT_PATH = "board.json";
 export const DEFAULT_API = "https://api.github.com";
@@ -46,6 +52,14 @@ const STALE_WINDOW_MS = 15000;
 const MAX_ATTEMPTS = 3;
 const MAX_BACKOFF_MS = 300000; // like the Pi's MAX_BACKOFF
 const DONE_CAP = 1000; // ids of pushed ops remembered for other tabs (see GitHubSource._mergeStored)
+// POST api/ops answers that retrying the same batch can't fix: 400 invalid op
+// or board full, 403 cross-site write refused, 413 body too large, 415 not
+// JSON. (503 — the Pi couldn't save, or its queue is full — is retried.)
+const PERMANENT_POST_STATUS = new Set([400, 403, 413, 415]);
+// Bytes of op JSON per POST api/ops. The Pi refuses bodies over 2 MiB (413),
+// so a long outbox goes in several requests instead of one that is refused.
+const POST_BUDGET_BYTES = 1024 * 1024;
+const WRITE_PROBE = { content: "lab-hub write-access check\n", encoding: "utf-8" };
 
 // ------------------------------------------------------------------ helpers
 
@@ -221,6 +235,20 @@ function validateAll(ops) {
   return list;
 }
 
+// Refuse a batch whose adds would go past LIMITS.maxItems in a collection of
+// `view` (the board the user sees, queued ops included) — the same check and
+// message as the Pi's 400 (app/store.py _check_room). Nothing is queued.
+function assertRoom(view, list) {
+  const full = checkRoom(view, list);
+  if (full) {
+    const err = new Error(full.error);
+    err.index = full.index;
+    throw err;
+  }
+}
+
+const utf8Length = (s) => (typeof TextEncoder === "function" ? new TextEncoder().encode(s).length : s.length * 3);
+
 function jsonEqual(a, b) {
   if (a === b) return true;
   if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
@@ -267,6 +295,13 @@ export function base64ToUtf8(b64) {
 
 // ================================================================ LocalSource
 
+function permanentPostMessage(status) {
+  if (status === 413) return "The change is too large for the dashboard server (HTTP 413)";
+  if (status === 403) return "The dashboard server refused the change (HTTP 403)";
+  if (status === 400) return "The dashboard server rejected the change";
+  return `The dashboard server rejected the change (HTTP ${status})`;
+}
+
 function defaultPiSync() {
   return {
     enabled: false,
@@ -312,6 +347,11 @@ export class LocalSource {
 
   get board() {
     return this._view;
+  }
+
+  /** Ops this page queued that the Pi hasn't accepted yet (this page's outbox). */
+  get unsent() {
+    return this._outbox.length;
   }
 
   get sync() {
@@ -366,14 +406,17 @@ export class LocalSource {
   }
 
   /**
-   * Validate (throws Error(message) on an invalid op), apply optimistically
+   * Validate (throws Error(message) on an invalid op, or on adds that would
+   * go past LIMITS.maxItems — "board full: …"), apply optimistically
    * (subscribers fire before this returns its promise), then POST. Network
-   * failures keep the ops in the outbox (retried on the next poll); a 400
+   * failures and 503 keep the ops in the outbox (retried on the next poll);
+   * a refusal that retrying can't fix (400, 403, 413, 415) drops those ops,
    * reloads the board from the Pi and rejects with the server's error.
    */
   async submit(ops) {
     const list = validateAll(ops);
     if (!list.length) return this.sync;
+    assertRoom(this._view, list);
     const prepared = list.map((op) => prepOp(op, this.clientName));
     this._outbox.push(...prepared);
     this._recompute();
@@ -382,6 +425,19 @@ export class LocalSource {
     const mine = rejected.filter((r) => prepared.includes(r.op));
     if (mine.length) throw new Error(mine[0].error);
     return this.sync;
+  }
+
+  /**
+   * Push this page's outbox to the Pi now, without asking it to sync with
+   * GitHub (no api/sync). Never rejects: ops that couldn't be sent stay
+   * queued (check `unsent` afterwards); ops the Pi refuses for good are
+   * dropped and logged, as on a poll. Resolves to `sync`.
+   */
+  async flush() {
+    return this._enqueue(async () => {
+      await this._flushLogged();
+      return this.sync;
+    });
   }
 
   /** Flush the outbox, ask the Pi to run a GitHub sync cycle now, reload. */
@@ -493,10 +549,31 @@ export class LocalSource {
     this._outbox = this._outbox.filter((op) => !gone.has(op));
   }
 
+  // The next POST's ops: in order, at most maxOpsPerPost, and (unless a single
+  // op is bigger) at most POST_BUDGET_BYTES of JSON.
+  _nextBatch() {
+    const batch = [];
+    let bytes = 0;
+    for (const op of this._outbox) {
+      if (batch.length >= LIMITS.maxOpsPerPost) break;
+      const n = utf8Length(JSON.stringify(op)) + 1;
+      if (batch.length && bytes + n > POST_BUDGET_BYTES) break;
+      batch.push(op);
+      bytes += n;
+    }
+    return batch;
+  }
+
+  async _flushLogged() {
+    if (!this._outbox.length) return;
+    const { rejected } = await this._flush();
+    if (rejected.length && typeof console !== "undefined") console.warn("Lab Hub: server rejected queued ops:", rejected);
+  }
+
   async _flush() {
     const rejected = [];
     while (this._outbox.length && !this._halted) {
-      const batch = this._outbox.slice(0, LIMITS.maxOpsPerPost);
+      const batch = this._nextBatch();
       let res;
       let data;
       try {
@@ -517,15 +594,21 @@ export class LocalSource {
         this._emit();
         continue;
       }
-      if (res.status === 400) {
-        const error = (data && typeof data.error === "string" && data.error) || "The dashboard server rejected the change";
+      const serverError = data && typeof data.error === "string" && data.error ? data.error : "";
+      if (PERMANENT_POST_STATUS.has(res.status)) {
+        // Sending these ops again can't succeed: drop them (just the op the
+        // Pi names, when it names one), roll the view back below.
+        this._httpError = null;
+        const error = serverError || permanentPostMessage(res.status);
         const idx = data && Number.isInteger(data.index) && data.index >= 0 && data.index < batch.length ? data.index : -1;
         const bad = idx >= 0 ? [batch[idx]] : batch;
         for (const op of bad) rejected.push({ op, error });
         this._dropFromOutbox(bad);
         continue; // the remaining ops are retried
       }
-      this._httpError = `Dashboard server error (HTTP ${res.status})`;
+      // 503 (couldn't save / queue full), other 5xx, anything unexpected: keep
+      // the ops and try again on the next poll.
+      this._httpError = serverError ? `${serverError} (HTTP ${res.status})` : `Dashboard server error (HTTP ${res.status})`;
       this._emit();
       break;
     }
@@ -537,11 +620,7 @@ export class LocalSource {
     this._timer = null;
     if (!this._active) return;
     await this._enqueue(async () => {
-      if (this._outbox.length) {
-        const { rejected } = await this._flush();
-        if (rejected.length && typeof console !== "undefined") console.warn("Lab Hub: server rejected queued ops:", rejected);
-        return;
-      }
+      if (this._outbox.length) return this._flushLogged();
       await this._load(false);
     });
     this._schedule();
@@ -656,30 +735,42 @@ export function githubCacheKey(settings) {
 }
 
 /**
- * Defaults for this page: repo inferred from "<owner>.github.io/<repo>/…"
- * (root site => "<owner>/<owner>.github.io"), else "richard-0417/lab-hub".
+ * The repo a GitHub Pages page is published from: "<owner>.github.io/<code>/…"
+ * => "<owner>/<code>"; the root site => "<owner>/<owner>.github.io". null when
+ * the page isn't on *.github.io (or outside a browser).
+ */
+export function pagesCodeRepo(loc) {
+  if (loc === undefined) loc = typeof location !== "undefined" ? location : null;
+  const host = loc && typeof loc.hostname === "string" ? loc.hostname.toLowerCase() : "";
+  if (!host.endsWith(".github.io") || host.length <= ".github.io".length) return null;
+  const owner = host.slice(0, -".github.io".length);
+  const segs = String((loc && loc.pathname) || "/").split("/");
+  const first = segs[1] || "";
+  const isDir = segs.length > 2;
+  let name = "";
+  try {
+    name = decodeURIComponent(first);
+  } catch (_) {
+    name = first;
+  }
+  return name && (isDir || !/\.html?$/i.test(name)) ? `${owner}/${name}` : `${owner}/${owner}.github.io`;
+}
+
+/**
+ * Defaults for this page. The default setup is ONE repo — code on `main`,
+ * board.json on the `data` branch — so the board repo is the repo the page
+ * is published from: "<owner>.github.io/<repo>/…" => "<owner>/<repo>" (root
+ * site => "<owner>/<owner>.github.io"); anywhere else "richard-0417/lab-hub".
+ * Branch "data", path "board.json".
  * ?repo= ?branch= ?path= ?api= prefill these defaults (they never override
- * saved settings — use `loadGitHubSettings() || defaultGitHubSettings()`).
+ * saved settings — use `loadGitHubSettings() || defaultGitHubSettings()`);
+ * ?repo= is how a link points a first connect at a separate data repo.
  * A ?branch= or ?path= that isn't usable is ignored, and ?api= is honoured
  * only on a local development page (customApiAllowed).
  */
 export function defaultGitHubSettings(loc) {
   if (loc === undefined) loc = typeof location !== "undefined" ? location : null;
-  let repo = DEFAULT_REPO;
-  const host = loc && typeof loc.hostname === "string" ? loc.hostname.toLowerCase() : "";
-  if (host.endsWith(".github.io") && host.length > ".github.io".length) {
-    const owner = host.slice(0, -".github.io".length);
-    const segs = String((loc && loc.pathname) || "/").split("/");
-    const first = segs[1] || "";
-    const isDir = segs.length > 2;
-    let name = "";
-    try {
-      name = decodeURIComponent(first);
-    } catch (_) {
-      name = first;
-    }
-    repo = name && (isDir || !/\.html?$/i.test(name)) ? `${owner}/${name}` : `${owner}/${owner}.github.io`;
-  }
+  const repo = pagesCodeRepo(loc) || DEFAULT_REPO;
   const s = { apiBase: DEFAULT_API, repo, branch: DEFAULT_BRANCH, path: DEFAULT_PATH, token: "", clientName: "" };
   let q = null;
   try {
@@ -765,34 +856,91 @@ function githubFailure(res, data, { token, repo, what = "request" } = {}) {
   return { message: `GitHub returned HTTP ${status}${msg ? `: ${msg}` : ""}`, retryAt: 0 };
 }
 
+function isRateLimited(res, data) {
+  const msg = data && typeof data.message === "string" ? data.message : "";
+  return res.status === 429 || (res.status === 403 && (header(res, "x-ratelimit-remaining") === "0" || /rate limit/i.test(msg)));
+}
+
 /**
- * Check settings against GET /repos/<repo>.
- * -> {ok, error, canWrite, private}
- * ok: the repo is readable (and the token, if any, was accepted).
- * canWrite: permissions.push === true (always false without a token).
- * error: null, or a message (also set when ok but a token can't write).
+ * Can `token` write to `repo`? POST /repos/<repo>/git/blobs needs Contents:
+ * write, and only stores an unreferenced blob (always the same bytes): no
+ * branch, file or history changes. Fail-safe — only a 201 means yes:
+ * -> {canWrite: true} | {canWrite: false} (403/404) | {canWrite: null, why}.
  */
-export async function testGitHubSettings(settings, fetchImpl) {
-  const s = normalizeGitHubSettings(settings);
-  const fail = (error) => ({ ok: false, error, canWrite: false, private: false });
+async function probeWrite(fetchImpl, apiBase, repo, token) {
+  let res;
+  let data;
+  try {
+    ({ res, data } = await fetchWithTimeout(
+      fetchImpl,
+      `${apiBase}/repos/${repo}/git/blobs`,
+      {
+        method: "POST",
+        headers: Object.assign(ghHeaders(token), { "Content-Type": "application/json" }),
+        body: JSON.stringify(WRITE_PROBE),
+        cache: "no-store",
+      },
+      15000,
+    ));
+  } catch (_) {
+    return { canWrite: null, why: "no answer from GitHub" };
+  }
+  if (res.status === 201) return { canWrite: true };
+  if (isRateLimited(res, data)) return { canWrite: null, why: "GitHub rate limit reached" };
+  if (res.status === 403 || res.status === 404) return { canWrite: false };
+  const msg = data && typeof data.message === "string" ? data.message : "";
+  return { canWrite: null, why: `GitHub answered HTTP ${res.status}${msg ? `: ${msg}` : ""}` };
+}
+
+/**
+ * Check settings: GET /repos/<repo>, then (only with a token) a write probe
+ * (probeWrite). Probe trouble never makes `ok` false, so it never blocks
+ * Connect.
+ * -> {ok, error, canWrite, private, warnings}
+ * ok: the repo is readable (and the token, if any, was accepted).
+ * canWrite: true (the probe wrote) | false (no token, or the probe got
+ *   403/404) | null (a token, but write access couldn't be confirmed:
+ *   rate limit, 5xx, an empty repo, no answer…).
+ * error: null; or why ok is false; or, when ok, the hint (canWrite false
+ *   with a token) or the note (canWrite null).
+ * warnings: [] — except in the two-repo setup (the page is published from
+ *   "<owner>/<code>" but the board is in another repo) when the token can
+ *   ALSO write the code repo. The default one-repo setup never warns.
+ * `loc` (optional) is the page location (default: the global `location`).
+ */
+export async function testGitHubSettings(settings, fetchImpl, loc) {
+  if (loc === undefined) loc = typeof location !== "undefined" ? location : null;
+  const f = fetchImpl || defaultFetch;
+  const s = normalizeGitHubSettings(settings, loc);
+  const fail = (error) => ({ ok: false, error, canWrite: false, private: false, warnings: [] });
   const bad = githubSettingsError(s);
   if (bad) return fail(bad);
   let res;
   let data;
   try {
-    ({ res, data } = await fetchWithTimeout(
-      fetchImpl || defaultFetch,
-      `${s.apiBase}/repos/${s.repo}`,
-      { method: "GET", headers: ghHeaders(s.token), cache: "no-store" },
-      15000,
-    ));
+    ({ res, data } = await fetchWithTimeout(f, `${s.apiBase}/repos/${s.repo}`, { method: "GET", headers: ghHeaders(s.token), cache: "no-store" }, 15000));
   } catch (_) {
     return fail(GH_OFFLINE_MSG);
   }
   if (res.ok && data && typeof data === "object") {
-    const canWrite = !!s.token && !!(data.permissions && data.permissions.push === true);
-    const error = s.token && !canWrite ? "The token works, but it can't write to this repo (needs Contents: read & write)" : null;
-    return { ok: true, error, canWrite, private: data.private === true };
+    const out = { ok: true, error: null, canWrite: false, private: data.private === true, warnings: [] };
+    if (!s.token) return out;
+    const code = pagesCodeRepo(loc);
+    const twoRepos = !!code && repoOk(code) && code.toLowerCase() !== s.repo.toLowerCase();
+    const [mine, theirs] = await Promise.all([
+      probeWrite(f, s.apiBase, s.repo, s.token),
+      twoRepos ? probeWrite(f, s.apiBase, code, s.token) : null,
+    ]);
+    out.canWrite = mine.canWrite;
+    if (mine.canWrite === false) {
+      out.error = `This token can read ${s.repo} but not write it — give it Contents: Read and write`;
+    } else if (mine.canWrite === null) {
+      out.error = `Couldn't confirm that this token can write to ${s.repo} (${mine.why}). If the sync pill turns red later, check it has Contents: Read and write`;
+    }
+    if (theirs && theirs.canWrite === true) {
+      out.warnings.push(`This token can also change the dashboard's code (${code}). For the separate-data-repo setup, give it access to ${s.repo} only.`);
+    }
+    return out;
   }
   if (res.status === 401) return fail("GitHub rejected this token (expired or revoked?)");
   if (res.status === 404) {
@@ -975,14 +1123,16 @@ export class GitHubSource {
   }
 
   /**
-   * Validate (throws Error(message); Error("read-only") without a token),
-   * queue + persist, apply optimistically (subscribers fire immediately),
-   * and push after a short debounce (at once if the page is hidden first).
+   * Validate (throws Error(message); Error("read-only") without a token;
+   * "board full: …" when adds would go past LIMITS.maxItems), queue +
+   * persist, apply optimistically (subscribers fire immediately), and push
+   * after a short debounce (at once if the page is hidden first).
    */
   async submit(ops) {
     if (!this.canEdit) throw new Error("read-only");
     const list = validateAll(ops);
     if (!list.length) return this.sync;
+    assertRoom(this._view, list);
     for (const op of list) this._queue.push({ qid: newQid(), op: prepOp(op, this._s.clientName) });
     this._dirty = true;
     this._refresh();

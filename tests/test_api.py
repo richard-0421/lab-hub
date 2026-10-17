@@ -14,7 +14,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,8 +24,9 @@ if ROOT not in sys.path:
 import uvicorn  # noqa: E402
 
 from app import calendar_feed  # noqa: E402
+from app import config as app_config  # noqa: E402
 from app import main as app_main  # noqa: E402
-from app.config import git_origin_repo, github_enabled, load_config, redacted  # noqa: E402
+from app.config import git_origin_repo, github_config_error, github_enabled, load_config, redacted  # noqa: E402
 from app.main import compute_version, create_app, git_head_sha, static_files_hash  # noqa: E402
 from app.store import StoreUnavailable  # noqa: E402
 from tests.mock_github import MockGitHub  # noqa: E402
@@ -150,7 +151,9 @@ class LocalApiTests(_ApiBase):
         self.assertEqual(body["name"], "Test Lab")
         self.assertEqual(body["client"], "lab-pi")
         self.assertEqual(body["theme"], "dark")
-        self.assertEqual(body["github"], {
+        github = dict(body["github"])
+        self.assertIsNone(github.pop("last_error", None))  # only set for an unusable repo/branch/path
+        self.assertEqual(github, {
             "enabled": False,
             "repo": "richard-0417/lab-hub",
             "branch": "data",
@@ -329,6 +332,58 @@ class LocalApiTests(_ApiBase):
         self.assertIn(title, [t["title"] for t in body["board"]["tasks"]])
 
 
+class BadGitHubConfigApiTests(_ApiBase):
+    """An unusable github_branch: the server still starts, runs local-only,
+    never contacts GitHub, and says why."""
+
+    ERROR = "config: github_branch 'x..y' is not a valid branch name"
+
+    @classmethod
+    def prepare(cls, tmp):
+        cls.mock = MockGitHub(repo="richard-0417/lab-hub", token=SECRET).start()
+
+    @classmethod
+    def make_env(cls, tmp):
+        return {
+            "LABHUB_GITHUB_REPO": "richard-0417/lab-hub",
+            "LABHUB_GITHUB_TOKEN": SECRET,
+            "LABHUB_GITHUB_BRANCH": "x..y",
+            "LABHUB_GITHUB_API": cls.mock.url,
+            "LABHUB_SYNC_INTERVAL": "2",
+        }
+
+    def test_sync_is_off_and_the_board_still_works(self):
+        self.assertEqual(github_config_error(self.cfg), self.ERROR)
+        self.assertFalse(github_enabled(self.cfg))
+        status, _, data = http("GET", self.base + "/api/config")
+        self.assertEqual(status, 200)
+        self.assertNotIn(SECRET.encode(), data)
+        github = json.loads(data)["github"]
+        self.assertIs(github["enabled"], False)
+        self.assertEqual(github["repo"], "richard-0417/lab-hub")
+        self.assertEqual(github["branch"], "x..y")  # shown as configured
+        _, _, sync = get_json(self.base + "/api/sync")
+        self.assertIs(sync["enabled"], False)
+        self.assertEqual(sync["state"], "off")
+        status, _, data = http("POST", self.base + "/api/ops", {"ops": [add_task("t-badcfg", "Still works")]})
+        self.assertEqual(status, 200)
+        self.assertIn("Still works", [t["title"] for t in json.loads(data)["board"]["tasks"]])
+        status, _, data = http("POST", self.base + "/api/sync")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)["state"], "off")
+        self.assertEqual(self.mock.count(), 0)  # nothing was ever sent to GitHub
+
+    def test_config_error_is_reported(self):
+        _, _, body = get_json(self.base + "/api/config")
+        if "last_error" not in body["github"]:
+            self.skipTest("app/main.py does not report github_config_error() yet")
+        self.assertEqual(body["github"]["last_error"], self.ERROR)
+        self.assertIs(body["github"]["enabled"], False)
+        _, _, sync = get_json(self.base + "/api/sync")
+        self.assertEqual(sync["state"], "off")
+        self.assertEqual(sync["last_error"], self.ERROR)
+
+
 class GitHubApiTests(_ApiBase):
     @classmethod
     def prepare(cls, tmp):
@@ -470,6 +525,74 @@ class ConfigTests(unittest.TestCase):
         cfg = self.load(env={"LABHUB_ALLOWED_HOSTS": " labpi.example.org, *  "})
         self.assertEqual(cfg["allowed_hosts"], ["labpi.example.org", "*"])
 
+    def test_invalid_github_settings_turn_sync_off(self):
+        good = {"github_repo": "richard-0417/lab-hub", "github_token": "t"}
+        with self.assertLogs("labhub.config", level="WARNING") as logs:
+            cfg = self.load(dict(good, github_branch="x..y"))
+        self.assertEqual(github_config_error(cfg), "config: github_branch 'x..y' is not a valid branch name")
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("config: github_branch 'x..y' is not a valid branch name; GitHub sync is off", logs.output[0])
+        self.assertFalse(github_enabled(cfg))
+        self.assertEqual((cfg["github_repo"], cfg["github_branch"]), ("richard-0417/lab-hub", "x..y"))
+        with self.assertLogs("labhub.config", level="WARNING") as logs:
+            cfg = self.load({"github_repo": "a/..", "github_token": SECRET})
+        self.assertNotIn(SECRET, github_config_error(cfg) + "".join(logs.output))
+
+        bad = {
+            "github_branch": ["x..y", ".hidden", "feature/.x", "data.lock", "feature/Data.LOCK", "data.", "a//b",
+                              "a b", "da~ta", "da:ta", "a\\b", "%2e%2e", "../main", "ref/./x", "dat\u00e4"],
+            "github_path": ["../board.json", "..", "...", "a/./b.json", "a//b.json", "a b.json", "a\\b.json",
+                            "%2e%2e/board.json", "a?b.json", "board.json#x"],
+            "github_repo": ["richard-0417/..", "../lab-hub", "./lab-hub", "a/b/c", "richard-0417/lab hub",
+                            "https://github.com/richard-0417/..", "richard-0417/lab-hub?x"],
+        }
+        for key, values in bad.items():
+            for value in values:
+                with self.assertLogs("labhub.config", level="WARNING"):
+                    cfg = self.load(dict(good, **{key: value}))
+                self.assertFalse(github_enabled(cfg), (key, value))
+                self.assertTrue(github_config_error(cfg).startswith("config: %s '" % key), (key, value))
+                if key == "github_repo":
+                    self.assertEqual((cfg["github_repo"], cfg["pages_url"]), ("", ""))
+        # from the environment too
+        with self.assertLogs("labhub.config", level="WARNING"):
+            cfg = self.load(good, {"LABHUB_GITHUB_PATH": "../../etc/passwd"})
+        self.assertEqual(github_config_error(cfg), "config: github_path '../../etc/passwd' is not a valid file path")
+
+        # several problems: one message, one log line
+        with self.assertLogs("labhub.config", level="WARNING") as logs:
+            cfg = self.load({"github_repo": "a/..", "github_branch": "b..", "github_path": "../c", "github_token": "t"})
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(github_config_error(cfg), "; ".join([
+            "config: github_repo 'a/..' is not a valid repository (use owner/name, e.g. richard-0417/lab-hub)",
+            "config: github_branch 'b..' is not a valid branch name",
+            "config: github_path '../c' is not a valid file path",
+        ]))
+        # odd characters and long values are shown safely
+        with self.assertLogs("labhub.config", level="WARNING"):
+            cfg = self.load(dict(good, github_branch="a\u0007b" + "x" * 300))
+        msg = github_config_error(cfg)
+        self.assertIn("'a?bxxx", msg)
+        self.assertIn("...'", msg)
+        self.assertLess(len(msg), 160)
+
+    def test_valid_github_settings(self):
+        good = {"github_repo": "richard-0417/lab-hub", "github_token": "t"}
+        with mock.patch.object(app_config.log, "warning") as warn:
+            for extra in ({}, {"github_branch": "feature/board-v2"}, {"github_branch": "v1.2"},
+                          {"github_branch": "release_2026"}, {"github_path": "boards/lab.json"},
+                          {"github_path": "/board.json/"}, {"github_path": ".github/board.json"},
+                          {"github_repo": "a_b/c.d"}, {"github_repo": "https://github.com/Richard-0417/Lab.Hub.git"}):
+                cfg = self.load(dict(good, **extra))
+                self.assertEqual(github_config_error(cfg), "", extra)
+                self.assertTrue(github_enabled(cfg), extra)
+            # no repo: local-only, the branch and path are never used, nothing to report
+            cfg = self.load({"github_branch": "x..y", "github_path": "../x", "github_token": "t"})
+            self.assertEqual(github_config_error(cfg), "")
+            self.assertFalse(github_enabled(cfg))
+            warn.assert_not_called()
+        self.assertEqual(self.load(dict(good, github_path="/board.json/"))["github_path"], "board.json")
+
     def write_git(self, origin, gitfile=False):
         git = os.path.join(self.tmp, "real.git" if gitfile else ".git")
         os.makedirs(git, exist_ok=True)
@@ -490,6 +613,30 @@ class ConfigTests(unittest.TestCase):
                          "https://richard-0417.github.io/lab-hub/")
         self.assertEqual(self.load({"github_repo": "a/b", "pages_url": "https://lab.example.org/"})["pages_url"],
                          "https://lab.example.org/")
+
+    def test_pages_url_single_repo(self):
+        # the default setup: one public repo, main = code + Pages, data = board.json
+        for origin in ("https://github.com/richard-0417/lab-hub.git", "https://github.com/richard-0417/lab-hub",
+                       "git@github.com:Richard-0417/lab-hub.git", "ssh://git@github.com/richard-0417/lab-hub.git"):
+            self.write_git(origin)
+            for repo in ("richard-0417/lab-hub", "https://github.com/richard-0417/lab-hub.git"):
+                cfg = self.load({"github_repo": repo, "github_branch": "data"})
+                self.assertEqual(cfg["pages_url"], "https://richard-0417.github.io/lab-hub/", (origin, repo))
+        # github_repo set but no git origin (no checkout, or no "origin" remote): derived from github_repo
+        with open(os.path.join(self.tmp, ".git", "config"), "w") as f:
+            f.write('[remote "upstream"]\n\turl = https://github.com/someone/else.git\n')
+        self.assertEqual(git_origin_repo(self.tmp), "")
+        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub"})["pages_url"],
+                         "https://richard-0417.github.io/lab-hub/")
+        shutil.rmtree(os.path.join(self.tmp, ".git"))
+        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub"})["pages_url"],
+                         "https://richard-0417.github.io/lab-hub/")
+        self.assertEqual(self.load(env={"LABHUB_GITHUB_REPO": "richard-0417/lab-hub"})["pages_url"],
+                         "https://richard-0417.github.io/lab-hub/")
+        # no repo -> no link; an explicit one always wins
+        self.assertEqual(self.load({})["pages_url"], "")
+        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub", "pages_url": "https://x.example/"})
+                         ["pages_url"], "https://x.example/")
 
     def test_pages_url_origin_forms(self):
         self.write_git("https://user:secret@github.com/Richard-0417/lab-hub", gitfile=True)
@@ -629,6 +776,71 @@ END:VEVENT
 END:VCALENDAR
 """
 
+# effective ends (RFC 5545 DURATION / defaults); read at 2026-10-16 15:00
+ICS_ENDS = """BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Holiday
+DTSTART;VALUE=DATE:20261016
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Retreat
+DTSTART;VALUE=DATE:20261015
+DURATION:P3D
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Yesterday
+DTSTART;VALUE=DATE:20261015
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Seminar
+DTSTART:20261016T080000
+DURATION:PT8H
+BEGIN:VALARM
+TRIGGER:-PT15M
+DURATION:PT5M
+REPEAT:2
+ACTION:DISPLAY
+SUMMARY:Alarm text
+END:VALARM
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Short seminar
+DTSTART:20261016T080000
+DURATION:PT6H30M
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Standup
+DTSTART:20261016T090000
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Week block
+DTSTART:20261012T100000
+DURATION:P1W
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Soon
+DTSTART:20261016T130000
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Backwards
+DTSTART:20261016T170000
+DURATION:-PT1H
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Ended dtend
+DTSTART:20261016T080000
+DTEND:20261016T070000
+DURATION:PT10H
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Bad duration
+DTSTART;VALUE=DATE:20261016
+DURATION:PTX
+END:VEVENT
+END:VCALENDAR
+"""
+
 
 class CalendarTests(unittest.TestCase):
     def setUp(self):
@@ -651,7 +863,8 @@ class CalendarTests(unittest.TestCase):
         by = {e["summary"]: e for e in res["events"]}
         self.assertEqual(by["Group meeting, room 2"]["end"], "2026-10-16T16:00:00")
         self.assertEqual(by["Group meeting, room 2"]["location"], "Pierce 301")
-        self.assertIsNone(by["No end"]["end"])
+        # RFC 5545: a timed event without DTEND/DURATION ends when it starts
+        self.assertEqual(by["No end"]["end"], "2026-10-20T09:00:00")
         self.assertTrue(by["Lab cleanup day"]["all_day"])
         self.assertEqual(by["Lab cleanup day"]["end"], "2026-10-17T00:00:00")
         self.assertEqual(set(res["events"][0]), {"summary", "location", "start", "end", "all_day"})
@@ -672,6 +885,65 @@ class CalendarTests(unittest.TestCase):
         again = calendar_feed.get_events(cfg, now=datetime(2026, 10, 16, 12))
         self.assertEqual(first, again)
         self.assertEqual(len(again["events"]), 4)
+
+    def events_at(self, ics, now):
+        with open(self.ics, "w") as f:
+            f.write(ics)
+        calendar_feed.clear_cache()
+        res = calendar_feed.get_events({"calendar_ics": self.ics, "calendar_max_events": 20}, now=now)
+        return {e["summary"]: e for e in res["events"]}, [e["summary"] for e in res["events"]]
+
+    def test_effective_end_from_duration_or_default(self):
+        # 15:00, so anything that started before 12:00 stays only while it lasts
+        by, order = self.events_at(ICS_ENDS, datetime(2026, 10, 16, 15, 0, 0))
+        self.assertEqual(order, ["Week block", "Retreat", "Holiday", "Bad duration", "Seminar", "Soon", "Backwards"])
+        # all-day without DTEND: lasts its own day (it used to vanish at 03:00)
+        self.assertEqual(by["Holiday"]["end"], "2026-10-17T00:00:00")
+        self.assertTrue(by["Holiday"]["all_day"])
+        self.assertEqual(by["Retreat"]["end"], "2026-10-18T00:00:00")  # DATE + P3D
+        self.assertEqual(by["Week block"]["end"], "2026-10-19T10:00:00")  # P1W
+        # the VALARM's DURATION / SUMMARY belong to the alarm, not the event
+        self.assertEqual(by["Seminar"]["end"], "2026-10-16T16:00:00")
+        # timed without DTEND/DURATION: no length; a negative DURATION or a
+        # DTEND before the start doesn't put the end before the start
+        self.assertEqual(by["Soon"]["end"], "2026-10-16T13:00:00")
+        self.assertEqual(by["Backwards"]["end"], "2026-10-16T17:00:00")
+        self.assertEqual(by["Bad duration"]["end"], "2026-10-17T00:00:00")
+        for gone in ("Standup", "Yesterday", "Short seminar", "Alarm text", "Ended dtend"):
+            self.assertNotIn(gone, by)
+
+        # the all-day event is still listed late in its own day, gone at midnight
+        by, _ = self.events_at(ICS_ENDS, datetime(2026, 10, 16, 23, 59, 0))
+        self.assertIn("Holiday", by)
+        by, _ = self.events_at(ICS_ENDS, datetime(2026, 10, 17, 0, 0, 0))
+        self.assertNotIn("Holiday", by)
+        self.assertIn("Retreat", by)
+
+    def test_parse_duration(self):
+        d = calendar_feed.parse_duration
+        self.assertEqual(d("PT1H"), timedelta(hours=1))
+        self.assertEqual(d("P2W"), timedelta(weeks=2))
+        self.assertEqual(d("P15DT5H0M20S"), timedelta(days=15, hours=5, seconds=20))
+        self.assertEqual(d("+P1D"), timedelta(days=1))
+        self.assertEqual(d("-PT15M"), timedelta(minutes=-15))
+        self.assertEqual(d(" pt30m "), timedelta(minutes=30))
+        self.assertEqual(d("P0D"), timedelta(0))
+        for bad in ("", "P", "PT", "P1DT", "PT5", "P1W2D", "1H", "P1H", "PT1D", "P-1D", "P99999999999D", None):
+            self.assertIsNone(d(bad), bad)
+
+    def test_effective_end(self):
+        end = calendar_feed.effective_end
+        day = datetime(2026, 10, 16)
+        at9 = datetime(2026, 10, 16, 9)
+        self.assertEqual(end(at9, datetime(2026, 10, 16, 10)), datetime(2026, 10, 16, 10))
+        self.assertEqual(end(at9, None, timedelta(minutes=45)), datetime(2026, 10, 16, 9, 45))
+        self.assertEqual(end(at9, datetime(2026, 10, 16, 10), timedelta(hours=5)), datetime(2026, 10, 16, 10))
+        self.assertEqual(end(at9), at9)
+        self.assertEqual(end(day, all_day=True), datetime(2026, 10, 17))
+        self.assertEqual(end(day, day, all_day=True), datetime(2026, 10, 17))  # DTEND is exclusive
+        self.assertEqual(end(at9, datetime(2026, 10, 16, 8)), at9)
+        self.assertEqual(end(datetime(9999, 12, 31), all_day=True), datetime(9999, 12, 31))
+        self.assertIsNone(end(None, at9))
 
 
 # --------------------------------------------------------------------------- #

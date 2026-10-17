@@ -19,6 +19,7 @@ class FakePi {
     this.log = [];
     this.gate = null; // a promise POST api/ops waits on (to observe optimistic state)
     this.rejectIf = null; // op => error string (server-side validation the client doesn't know)
+    this.answer = null; // ops => Response | null: override POST api/ops (e.g. 413 / 415 / 403 / 503)
     this.syncCalls = 0;
     this.sync = {
       enabled: true, state: "ok", pending: 0, last_sync: TS, last_push: TS, last_error: null,
@@ -41,6 +42,8 @@ class FakePi {
       if (this.gate) await this.gate;
       if (this.down) throw new TypeError("fetch failed");
       const { ops } = JSON.parse(init.body);
+      const forced = this.answer && this.answer(ops, init);
+      if (forced) return forced;
       for (let i = 0; i < ops.length; i++) {
         const err = B.validateOp(ops[i]) || (this.rejectIf && this.rejectIf(ops[i]));
         if (err) return json(400, { error: err, index: i });
@@ -291,6 +294,237 @@ describe("LocalSource", () => {
       assert.equal(sync.pending, 0);
       assert.deepEqual(titles(src.board), ["A", "B"]);
       assert.deepEqual(titles(pi.board), ["A", "B"], "the re-sent add is a no-op on the Pi");
+    } finally {
+      src.stop();
+    }
+  });
+});
+
+describe("LocalSource: unsent / flush()", () => {
+  test("unsent counts only this page's outbox (not the Pi's GitHub queue)", async () => {
+    const pi = new FakePi({ tasks: [{ id: "t-a", title: "A" }] });
+    pi.sync = Object.assign({}, pi.sync, { pending: 4, state: "pending" });
+    const src = makeSource(pi);
+    try {
+      await src.start();
+      assert.equal(src.unsent, 0);
+      assert.equal(src.sync.pending, 4);
+      pi.down = true;
+      await src.submit(addTask("t-b", "B", { rank: 1 }));
+      await src.submit(addTask("t-c", "C", { rank: 2 }));
+      assert.equal(src.unsent, 2);
+      assert.equal(src.sync.pending, 6, "sync.pending = the Pi's queue + this page's outbox");
+    } finally {
+      src.stop();
+    }
+  });
+
+  test("flush() pushes the outbox without api/sync and never rejects", async () => {
+    const pi = new FakePi({ tasks: [{ id: "t-a", title: "A" }] });
+    const src = makeSource(pi);
+    try {
+      await src.start();
+      pi.down = true;
+      await src.submit(addTask("t-b", "B", { rank: 1 }));
+      assert.equal(src.unsent, 1);
+      const offline = await src.flush(); // still down: resolves, keeps the op
+      assert.equal(offline.state, "offline");
+      assert.equal(src.unsent, 1);
+      pi.down = false;
+      const sync = await src.flush();
+      assert.equal(src.unsent, 0);
+      assert.equal(sync.pending, 0);
+      assert.deepEqual(titles(pi.board), ["A", "B"]);
+      assert.equal(pi.syncCalls, 0, "flush() never asks the Pi to sync with GitHub");
+      assert.equal(pi.log.filter((r) => r.url === "api/sync").length, 0);
+      const posts = pi.log.filter((r) => r.method === "POST").length;
+      await src.flush(); // empty outbox: nothing to send
+      assert.equal(pi.log.filter((r) => r.method === "POST").length, posts);
+    } finally {
+      src.stop();
+    }
+  });
+
+  test("flush() with an op the Pi refuses: dropped, board rolled back, still resolves", async () => {
+    const pi = new FakePi({ tasks: [{ id: "t-a", title: "A" }] });
+    pi.rejectIf = (op) => (op.op === "add" && op.item.title === "Bad" ? "nope" : null);
+    const src = makeSource(pi);
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      await src.start();
+      pi.down = true;
+      await src.submit(addTask("t-x", "Bad", { rank: 1 }));
+      pi.down = false;
+      await src.flush();
+      assert.equal(src.unsent, 0);
+      assert.deepEqual(titles(src.board), ["A"]);
+    } finally {
+      console.warn = warn;
+      src.stop();
+    }
+  });
+});
+
+describe("LocalSource: POST api/ops answers", () => {
+  for (const [status, error] of [
+    [413, "request body too large (limit 2 MB)"],
+    [415, "Content-Type must be application/json"],
+    [403, "cross-site request refused"],
+  ]) {
+    test(`${status} is permanent like 400: batch dropped, board reloaded, submit rejects with the server's text`, async () => {
+      const pi = new FakePi({ tasks: [{ id: "t-a", title: "A" }] });
+      pi.answer = () => json(status, { error, index: null });
+      const src = makeSource(pi, { pollMs: 20 });
+      const seen = [];
+      src.subscribe(({ board }) => seen.push(titles(board).join(",")));
+      try {
+        await src.start();
+        await assert.rejects(src.submit([addTask("t-b", "B", { rank: 1 }), addTask("t-c", "C", { rank: 2 })]), { message: error });
+        assert.ok(seen.includes("A,B,C"), "was shown optimistically");
+        assert.deepEqual(titles(src.board), ["A"], "rolled back to the Pi's board");
+        assert.equal(src.unsent, 0);
+        assert.equal(src.sync.pending, 0);
+        assert.notEqual(src.sync.state, "error", "the server answered; nothing is stuck");
+        const posts = pi.log.filter((r) => r.method === "POST" && r.url === "api/ops").length;
+        assert.equal(posts, 1);
+        await sleep(80); // polls don't send the dropped ops again
+        assert.equal(pi.log.filter((r) => r.method === "POST" && r.url === "api/ops").length, posts);
+        assert.ok(pi.log.filter((r) => r.method === "GET" && r.url === "api/board").length >= 2, "board reloaded after the refusal");
+        // the next edit goes through once the Pi accepts again
+        pi.answer = null;
+        await src.submit(addTask("t-d", "D", { rank: 3 }));
+        assert.deepEqual(titles(pi.board), ["A", "D"]);
+      } finally {
+        src.stop();
+      }
+    });
+  }
+
+  test("a permanent refusal without an error body still rejects with a readable message", async () => {
+    const pi = new FakePi();
+    pi.answer = () => new Response("Payload Too Large", { status: 413 });
+    const src = makeSource(pi);
+    try {
+      await src.start();
+      await assert.rejects(src.submit(addTask("t-b", "B")), /too large.*413/);
+      assert.equal(src.unsent, 0);
+    } finally {
+      src.stop();
+    }
+  });
+
+  test("503 keeps the ops and retries (error state shows the Pi's message), then they go through", async () => {
+    const pi = new FakePi({ tasks: [{ id: "t-a", title: "A" }] });
+    pi.answer = () => json(503, { error: "the change couldn't be saved on the Pi", index: null });
+    const src = makeSource(pi, { pollMs: 20 });
+    try {
+      await src.start();
+      await src.submit(addTask("t-b", "B", { rank: 1 })); // resolves: queued, not refused
+      assert.equal(src.unsent, 1);
+      assert.equal(src.sync.state, "error");
+      assert.match(src.sync.last_error, /couldn't be saved on the Pi \(HTTP 503\)/);
+      assert.deepEqual(titles(src.board), ["A", "B"], "still shown");
+      await sleep(70);
+      assert.ok(pi.log.filter((r) => r.method === "POST" && r.url === "api/ops").length >= 2, "retried on the next polls");
+      assert.equal(src.unsent, 1);
+      pi.answer = null;
+      await sleep(70);
+      assert.equal(src.unsent, 0);
+      assert.equal(src.sync.state, "ok");
+      assert.deepEqual(titles(pi.board), ["A", "B"]);
+    } finally {
+      src.stop();
+    }
+  });
+
+  test("a long outbox is sent in several POSTs that stay under the Pi's 2 MB body limit", async () => {
+    const pi = new FakePi();
+    const sizes = [];
+    pi.answer = (ops, init) => {
+      sizes.push(Buffer.byteLength(init.body));
+      return Buffer.byteLength(init.body) > 2 * 1024 * 1024 ? json(413, { error: "too large", index: null }) : null;
+    };
+    const src = makeSource(pi);
+    try {
+      await src.start();
+      pi.down = true;
+      const big = "é".repeat(3990); // ~8 KB of UTF-8 per op
+      const ops = Array.from({ length: 400 }, (_, i) => addTask(`t-${String(i).padStart(4, "0")}`, `T${i}`, { notes: big, rank: i }));
+      await src.submit(ops);
+      assert.equal(src.unsent, 400);
+      pi.down = false;
+      await src.flush();
+      assert.equal(src.unsent, 0);
+      assert.equal(pi.board.tasks.length, 400, "nothing refused, nothing lost");
+      assert.ok(sizes.length >= 3, `several requests (${sizes.length})`);
+      assert.ok(sizes.every((n) => n <= 1.1 * 1024 * 1024), `each body near the 1 MiB budget: ${sizes}`);
+      assert.deepEqual(pi.board.tasks.map((t) => t.title).slice(0, 3), ["T0", "T1", "T2"], "order kept");
+    } finally {
+      src.stop();
+    }
+  });
+});
+
+describe("LocalSource: the 2000-item cap", () => {
+  const fullTasks = (n) => Array.from({ length: n }, (_, i) => ({ id: `t${String(i).padStart(4, "0")}`, title: "x", rank: i }));
+
+  test("an add into a full collection is refused with the Pi's message; nothing is queued or sent", async () => {
+    const pi = new FakePi({ tasks: fullTasks(B.LIMITS.maxItems) });
+    const src = makeSource(pi);
+    try {
+      await src.start();
+      const before = src.board;
+      const err = await src.submit(addTask("t-new", "New")).then(() => null, (e) => e);
+      assert.ok(err, "rejected");
+      assert.equal(err.message, "board full: tasks already has 2000 items - delete some first (e.g. clear done tasks)");
+      assert.equal(err.index, 0);
+      assert.equal(src.unsent, 0);
+      assert.equal(src.board, before, "the view is untouched");
+      assert.equal(pi.log.filter((r) => r.method === "POST").length, 0);
+      // other collections still have room; re-adding an existing id is a no-op, not an error
+      await src.submit({ op: "add", coll: "notes", item: { id: "n-1", body: "hi" }, ts: TS });
+      await src.submit(addTask("t0005", "again"));
+      assert.equal(pi.board.notes.length, 1);
+    } finally {
+      src.stop();
+    }
+  });
+
+  test("the batch counts its own deletes and adds", async () => {
+    const pi = new FakePi({ tasks: fullTasks(B.LIMITS.maxItems - 1) });
+    const src = makeSource(pi);
+    try {
+      await src.start();
+      // two adds into 1999: the second doesn't fit -> the whole batch is refused (index 1)
+      const err = await src.submit([addTask("t-a1", "A1"), addTask("t-a2", "A2")]).then(() => null, (e) => e);
+      assert.match(err.message, /^board full: tasks already has 2000 items/);
+      assert.equal(err.index, 1);
+      assert.equal(src.unsent, 0);
+      assert.equal(src.board.tasks.length, 1999);
+      // a delete earlier in the batch makes room
+      await src.submit([
+        { op: "delete", coll: "tasks", id: "t0000", ts: TS },
+        addTask("t-a1", "A1"),
+        addTask("t-a2", "A2"),
+      ]);
+      assert.equal(pi.board.tasks.length, 2000);
+      assert.equal(src.board.tasks.length, 2000);
+    } finally {
+      src.stop();
+    }
+  });
+
+  test("queued (unsent) adds count against the cap too", async () => {
+    const pi = new FakePi({ tasks: fullTasks(B.LIMITS.maxItems - 1) });
+    const src = makeSource(pi);
+    try {
+      await src.start();
+      pi.down = true;
+      await src.submit(addTask("t-q", "queued"));
+      assert.equal(src.unsent, 1);
+      await assert.rejects(src.submit(addTask("t-r", "one too many")), /board full/);
+      assert.equal(src.unsent, 1);
     } finally {
       src.stop();
     }

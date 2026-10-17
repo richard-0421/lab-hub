@@ -71,6 +71,22 @@ test("every vector category is present and non-empty", () => {
   }
 });
 
+test("shared vectors pin the post-clamp re-trim and the '# # x' tag rule (both suites check them)", () => {
+  const titles = vectors.normalize.flatMap((v) =>
+    (v.input && Array.isArray(v.input.tasks) ? v.input.tasks : [])
+      .filter((t) => t && typeof t === "object" && typeof t.id === "string")
+      .map((t) => [t, v.output.tasks.find((o) => o.id === t.id)]),
+  );
+  assert.ok(
+    titles.some(([inp, out]) => inp.title === "x".repeat(299) + " y" && out && out.title === "x".repeat(299)),
+    "a vector clamps 'x'*299 + ' y' to the 299 x's",
+  );
+  assert.ok(
+    titles.some(([inp, out]) => Array.isArray(inp.tags) && inp.tags.includes("# # x") && out && out.tags[0] === "x"),
+    "a vector turns tag '# # x' into 'x'",
+  );
+});
+
 // ---------------------------------------------------------------- idempotence
 
 // Deterministic PRNG so failures are reproducible.
@@ -324,6 +340,66 @@ describe("ops", () => {
   test("validateOp rejects lone values that would empty required text", () => {
     assert.match(B.validateOp({ op: "update", coll: "notes", id: "n", ts: "2026-10-16", set: { body: "\n\t\n" } }), /empty/);
     assert.equal(B.validateOp({ op: "update", coll: "notes", id: "n", ts: "2026-10-16", set: { body: "\n x \n" } }), null);
+  });
+});
+
+// ---------------------------------------------------------- 2000-item cap
+
+describe("the 2000-item cap (like app/board.py _apply_in_place)", () => {
+  const TS = "2026-10-16T14:00:00Z";
+  const full = deepFreeze(B.normalizeBoard({ tasks: Array.from({ length: B.LIMITS.maxItems }, (_, i) => ({ id: `t${String(i).padStart(4, "0")}`, title: "x", rank: i })) }));
+  const add = (id, coll = "tasks") => ({ op: "add", coll, item: coll === "tasks" ? { id, title: "new", rank: -1 } : { id, body: "new" }, ts: TS });
+  const del = (id) => ({ op: "delete", coll: "tasks", id, ts: TS });
+
+  test("an add into a full collection is a no-op (same board back)", () => {
+    assert.equal(full.tasks.length, 2000);
+    assert.equal(B.applyOp(full, add("t-new")), full, "no 2001-item file whose normalization would drop t1999");
+    assert.equal(B.applyOps(full, [add("t-new"), add("t-new2")]), full);
+  });
+
+  test("an existing id is still a plain duplicate no-op; other collections are unaffected", () => {
+    assert.equal(B.applyOp(full, add("t0005")), full);
+    const withNote = B.applyOp(full, add("n-1", "notes"));
+    assert.equal(withNote.notes.length, 1);
+    assert.equal(withNote.tasks, full.tasks);
+  });
+
+  test("a delete makes room again", () => {
+    const after = B.applyOps(full, [del("t0005"), add("t-new")]);
+    assert.equal(after.tasks.length, 2000);
+    assert.equal(after.tasks[0].id, "t-new");
+    assert.deepEqual(B.normalizeBoard(after), after);
+  });
+
+  test("checkRoom: null while there is room", () => {
+    assert.equal(B.checkRoom(B.emptyBoard(), [add("t-1")]), null);
+    assert.equal(B.checkRoom(full, []), null);
+    assert.equal(B.checkRoom(full, [add("n-1", "notes")]), null);
+    assert.equal(B.checkRoom(full, [add("t0005")]), null, "re-adding an existing id is a no-op, not an error");
+    assert.equal(B.checkRoom(full, [{ op: "update", coll: "tasks", id: "t0001", set: { title: "y" }, ts: TS }]), null);
+    assert.equal(B.checkRoom(full, [del("t0001"), add("t-new")]), null, "a delete earlier in the batch makes room");
+  });
+
+  test("checkRoom: the first add that doesn't fit, with the Pi's exact message", () => {
+    const msg = "board full: tasks already has 2000 items - delete some first (e.g. clear done tasks)";
+    assert.equal(B.boardFullMessage("tasks"), msg);
+    assert.deepEqual(B.checkRoom(full, [add("t-new")]), { index: 0, error: msg });
+    assert.deepEqual(B.checkRoom(full, [del("t0001"), add("t-a"), add("t-b")]), { index: 2, error: msg }, "adds earlier in the batch count");
+    assert.deepEqual(B.checkRoom(full, [add("t-a"), del("t0001")]), { index: 0, error: msg }, "a later delete doesn't help an earlier add");
+    const almost = B.applyOp(full, del("t0001"));
+    assert.deepEqual(B.checkRoom(almost, [add("t-a"), add("t-a"), add("t-b")]), { index: 2, error: msg }, "a repeated id in the batch counts once");
+    const notesFull = { notes: Array.from({ length: 2000 }, (_, i) => ({ id: `n${i}` })) };
+    assert.match(B.checkRoom(notesFull, [add("n-x", "notes")]).error, /^board full: notes already has 2000 items/);
+  });
+
+  test("checkRoom agrees with applyOps: no add it allows is dropped", () => {
+    const almost = B.applyOps(full, [del("t0001"), del("t0002")]);
+    const ops = [add("t-a"), del("t0003"), add("t-b"), add("t-c")];
+    assert.equal(B.checkRoom(almost, ops), null);
+    const out = B.applyOps(almost, ops);
+    for (const id of ["t-a", "t-b", "t-c"]) assert.ok(out.tasks.some((t) => t.id === id), id);
+    assert.equal(out.tasks.length, 2000);
+    assert.deepEqual(B.checkRoom(almost, ops.concat([add("t-d")])).index, 4);
   });
 });
 
