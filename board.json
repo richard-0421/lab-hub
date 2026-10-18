@@ -1,8 +1,23 @@
 {
   "schema": 1,
-  "updated_at": "2026-10-18T19:13:46Z",
-  "updated_by": "Richard",
+  "updated_at": "2026-10-18T19:29:05Z",
+  "updated_by": "Lab Bench",
   "tasks": [
+    {
+      "id": "t-p21w82rduj",
+      "title": "Lab test",
+      "notes": "",
+      "status": "todo",
+      "priority": "normal",
+      "assignee": "",
+      "due": "",
+      "tags": [],
+      "rank": -1,
+      "created_at": "2026-10-18T19:29:05Z",
+      "updated_at": "2026-10-18T19:29:05Z",
+      "done_at": "",
+      "created_by": "Lab Bench"
+    },
     {
       "id": "t-l1k1md7art",
       "title": "Set a meeting with Anton",
