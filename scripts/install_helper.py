@@ -17,7 +17,7 @@ command line. Nothing here ever prints the token.
           repo, does the board branch exist yet, and (only when the board is in
           a separate data repo) can it also write the code repo LH_ORIGIN names?
 
-The normal setup keeps code and board in ONE repo (richard-0417/lab-hub: main
+The normal setup keeps code and board in ONE repo (richard-0421/lab-hub: main
 = code, data = board.json); a separate data repo is an optional alternative.
 
 Other inputs: LH_APP_DIR (the install folder, default: this file's parent's
@@ -30,7 +30,7 @@ import re
 import sys
 import tempfile
 
-DEFAULT_REPO = "richard-0417/lab-hub"
+DEFAULT_REPO = "richard-0421/lab-hub"
 DEFAULT_BRANCH = "data"
 # keys of the old pFLARES-tracker dashboard that no longer mean anything
 OBSOLETE = ("data_dir", "csv_glob", "monitor_points", "stale_seconds",

@@ -4,12 +4,12 @@
 #
 # Run as your normal desktop user (NOT with sudo) from inside the cloned repo
 # (public, so no login; --single-branch skips the board's history on "data"):
-#   git clone --single-branch https://github.com/richard-0417/lab-hub.git ~/lab-hub
+#   git clone --single-branch https://github.com/richard-0421/lab-hub.git ~/lab-hub
 #   cd ~/lab-hub && ./scripts/install-pi.sh
 #
 # Options:
 #   --repo OWNER/NAME   GitHub repo whose "data" branch holds board.json
-#                       (default richard-0417/lab-hub, the same repo as the
+#                       (default richard-0421/lab-hub, the same repo as the
 #                       code; "none" = local-only, no sync). A separate data
 #                       repo is an optional alternative (README).
 #   --name TEXT         dashboard title (default "Lab Hub")
@@ -114,7 +114,7 @@ if git -C "$APP_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         # The Pi pulls the public repo anonymously; a credential saved in the
         # remote URL is never needed and sits in .git/config in clear text.
         warn "the 'origin' URL contains a login or token. The Pi only needs to pull, anonymously:"
-        warn "  git -C \"$APP_DIR\" remote set-url origin https://github.com/richard-0417/lab-hub.git" ;;
+        warn "  git -C \"$APP_DIR\" remote set-url origin https://github.com/richard-0421/lab-hub.git" ;;
     esac
   else
     ORIGIN=""
@@ -125,7 +125,7 @@ if git -C "$APP_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 else
   warn "$APP_DIR is not a git clone, so automatic code updates won't work."
-  warn "Clone it instead: git clone https://github.com/richard-0417/lab-hub.git ~/lab-hub"
+  warn "Clone it instead: git clone https://github.com/richard-0421/lab-hub.git ~/lab-hub"
 fi
 
 OLD_DIR=""
@@ -199,14 +199,14 @@ if [ "$OPT_REPO_SET" = 1 ]; then REPO="$OPT_REPO"
 else
   if [ "$INTERACTIVE" = 1 ]; then
     info "GitHub repo whose 'data' branch holds board.json: normally this code repo,"
-    info "richard-0417/lab-hub. ('none' = keep the board on this Pi only)"
+    info "richard-0421/lab-hub. ('none' = keep the board on this Pi only)"
   fi
   ask REPO "GitHub repo for the board (owner/name)" "$CUR_REPO"
 fi
 case "$REPO" in none|NONE|-|"") REPO="" ;; esac
 REPO="${REPO#https://github.com/}"; REPO="${REPO%.git}"; REPO="${REPO%/}"
 if [ -n "$REPO" ] && ! printf '%s' "$REPO" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'; then
-  die "'$REPO' doesn't look like owner/name (e.g. richard-0417/lab-hub)."
+  die "'$REPO' doesn't look like owner/name (e.g. richard-0421/lab-hub)."
 fi
 
 if [ "$OPT_ICS_SET" = 1 ]; then ICS="$OPT_ICS"

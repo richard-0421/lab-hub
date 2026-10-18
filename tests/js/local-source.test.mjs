@@ -23,7 +23,7 @@ class FakePi {
     this.syncCalls = 0;
     this.sync = {
       enabled: true, state: "ok", pending: 0, last_sync: TS, last_push: TS, last_error: null,
-      repo: "richard-0417/lab-hub", branch: "data", path: "board.json",
+      repo: "richard-0421/lab-hub", branch: "data", path: "board.json",
     };
     this.fetch = this.fetch.bind(this);
   }
@@ -86,7 +86,7 @@ describe("LocalSource", () => {
       assert.equal(s.canEdit, true);
       assert.equal(s.link, "up");
       assert.equal(s.state, "ok");
-      assert.equal(s.repo, "richard-0417/lab-hub");
+      assert.equal(s.repo, "richard-0421/lab-hub");
       assert.equal(s.loaded, true);
       assert.equal(pi.log[0].url, "api/board", "relative URL, no rev on first load");
     } finally {

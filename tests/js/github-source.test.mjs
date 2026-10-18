@@ -9,7 +9,7 @@ import { GitHubSource, utf8ToBase64, base64ToUtf8, githubCacheKey } from "../../
 const API = "https://api.test";
 const RAW_HOST = "raw.test";
 const RAW = `https://${RAW_HOST}`;
-const REPO = "richard-0417/lab-hub";
+const REPO = "richard-0421/lab-hub";
 const TOKEN = "test-token";
 const TS = "2026-10-16T14:00:00Z";
 
@@ -519,7 +519,7 @@ describe("GitHubSource", () => {
     assert.equal(sync.last_error, "Can't reach GitHub");
     assert.equal(sync.pending, 1);
     assert.deepEqual(titles(src.board), ["A", "B"]);
-    const saved = JSON.parse(storage.getItem("labhub:gh:richard-0417/lab-hub:data:board.json"));
+    const saved = JSON.parse(storage.getItem("labhub:gh:richard-0421/lab-hub:data:board.json"));
     assert.equal(saved.queue.length, 1);
     assert.equal(saved.queue[0].op.item.title, "B");
     assert.equal(typeof saved.queue[0].qid, "string");
@@ -712,8 +712,8 @@ describe("GitHubSource", () => {
     }
     assert.equal(s.enabled, true);
     assert.equal(s.mode, "github");
-    assert.equal(s.file_url, "https://github.com/richard-0417/lab-hub/blob/data/board.json");
-    assert.equal(githubCacheKey(settings()), "labhub:gh:richard-0417/lab-hub:data:board.json");
+    assert.equal(s.file_url, "https://github.com/richard-0421/lab-hub/blob/data/board.json");
+    assert.equal(githubCacheKey(settings()), "labhub:gh:richard-0421/lab-hub:data:board.json");
   });
 
   test("files over 1 MB are read through the blobs API", async () => {
@@ -908,7 +908,7 @@ describe("GitHubSource: the request timeout covers the body", () => {
 
 // ------------------------------------------------------------ two tabs, one queue
 
-const KEY = "labhub:gh:richard-0417/lab-hub:data:board.json";
+const KEY = "labhub:gh:richard-0421/lab-hub:data:board.json";
 const stored = (storage) => JSON.parse(storage.getItem(KEY));
 
 describe("GitHubSource: tabs sharing one localStorage key", () => {
@@ -1130,7 +1130,7 @@ describe("GitHubSource: read-only (no token)", () => {
     const src = new GitHubSource({ repo: REPO, branch: "data", path: "board.json", token: "" }, { fetchImpl, storage: memStorage() });
     const sync = await src.syncNow();
     assert.equal(sync.state, "readonly", sync.last_error);
-    assert.equal(urls[0].url, "https://raw.githubusercontent.com/richard-0417/lab-hub/refs/heads/data/board.json");
+    assert.equal(urls[0].url, "https://raw.githubusercontent.com/richard-0421/lab-hub/refs/heads/data/board.json");
     assert.equal(urls[0].init.headers, undefined);
   });
 
@@ -1175,7 +1175,7 @@ describe("GitHubSource: settings that would leave /repos/<repo>/contents/", () =
   });
 
   test("a branch or repo with '..' is refused before any request", async () => {
-    for (const extra of [{ branch: "../main" }, { branch: "a..b" }, { branch: ".hidden" }, { repo: "../.." }, { repo: "richard-0417/.." }]) {
+    for (const extra of [{ branch: "../main" }, { branch: "a..b" }, { branch: ".hidden" }, { repo: "../.." }, { repo: "richard-0421/.." }]) {
       const fake = new FakeGitHub();
       const src = new GitHubSource(settings(extra), { fetchImpl: fake.fetch, storage: memStorage(), pollMs: 1e9, pushDelayMs: 1e9 });
       const sync = await src.syncNow();

@@ -6,7 +6,7 @@ disagree, fix one of them in the same change.
 ## 1. The big picture
 
 ```
-                    richard-0417/lab-hub  (public)
+                    richard-0421/lab-hub  (public)
  ┌───────────────────────────────────────────────────────────────────┐
  │ branch main   code (app/ static/ scripts/ …) ──► Actions ──► Pages │
  │ branch data   board.json  (orphan: no shared history with main)    │
@@ -25,7 +25,7 @@ disagree, fix one of them in the same change.
  └──────────────────────────────────┘
 ```
 
-* **One repo, two branches.** `richard-0417/lab-hub` is public (free Pages).
+* **One repo, two branches.** `richard-0421/lab-hub` is public (free Pages).
   `main` holds the code; the board lives on the orphan branch `data` as
   `board.json`. Every token given to the Pi or a browser is a fine-grained PAT
   with Contents: read & write on `lab-hub`. Fine-grained PATs can be limited
@@ -35,7 +35,7 @@ disagree, fix one of them in the same change.
   pulls `main` anonymously.
 * **Optional: a separate data repo.** Everything that names the board's repo
   (`github_repo` on the Pi, **Repository** in a browser) can point at another
-  repo, e.g. a private `richard-0417/lab-hub-data`, with tokens scoped to it
+  repo, e.g. a private `richard-0421/lab-hub-data`, with tokens scoped to it
   only. Then the board is private and board tokens can't touch the code. Both
   `install-pi.sh` and the browser's connect check warn (in this setup only) if
   such a token can also write the code repo.
@@ -317,7 +317,7 @@ cross-site|same-site`, or an `Origin` other than this server) gets 403.
   "last_sync": "2026-10-16T14:03:22Z",   // last successful contact, or null
   "last_push": "2026-10-16T14:01:10Z",   // last successful write, or null
   "last_error": null,       // human-readable message, or null
-  "repo": "richard-0417/lab-hub", "branch": "data", "path": "board.json"
+  "repo": "richard-0421/lab-hub", "branch": "data", "path": "board.json"
 }
 ```
 
@@ -467,7 +467,7 @@ the states `syncing`, `ok`, `pending`, `offline`, `error` and **`readonly`**
   defaults come from the page URL: `?repo=`, `?branch=`, `?path=` pre-fill a
   first connect only; an unusable branch or path is ignored. Without `?repo=`
   the default repo is `<owner>/<first path segment>` of the page URL (root site:
-  `<owner>/<owner>.github.io`; elsewhere `richard-0417/lab-hub`), i.e. the same
+  `<owner>/<owner>.github.io`; elsewhere `richard-0421/lab-hub`), i.e. the same
   repo as the code, branch `data`, file `board.json`. Only the optional
   separate-data-repo setup needs `?repo=` in shared links. `?api=` (a mock server) is honoured only
   on a local development page (`localhost`, `127.0.0.1`, `[::1]`,
@@ -508,7 +508,7 @@ the states `syncing`, `ok`, `pending`, `offline`, `error` and **`readonly`**
 | `theme` | `"dark"` | `dark` \| `light` \| `auto` — kiosk default theme (a viewer can override in their browser) |
 | `calendar_ics` | `""` | published Outlook `.ics` URL or local path; empty = calendar panel shows setup hint |
 | `calendar_max_events` | `8` | |
-| `github_repo` | `""` | `owner/name` of the repo holding the board, normally `richard-0417/lab-hub` (the installer's default and `config.example.json`); empty = local-only |
+| `github_repo` | `""` | `owner/name` of the repo holding the board, normally `richard-0421/lab-hub` (the installer's default and `config.example.json`); empty = local-only |
 | `github_branch` | `"data"` | branch that holds the board file |
 | `github_path` | `"board.json"` | file path on that branch |
 | `github_token` | `""` | fine-grained PAT with **Contents: read & write** on that repo (prefer env `LABHUB_GITHUB_TOKEN`); never sent to browsers |

@@ -114,7 +114,7 @@ export function plural(n, one, many) {
   return `${n} ${n === 1 ? one : many || `${one}s`}`;
 }
 
-/** Strip the scheme and trailing slash for display: "richard-0417.github.io/lab-hub". */
+/** Strip the scheme and trailing slash for display: "richard-0421.github.io/lab-hub". */
 export function displayUrl(url) {
   return String(url || "").replace(/^https?:\/\//i, "").replace(/\/+$/, "");
 }

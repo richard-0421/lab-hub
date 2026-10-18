@@ -133,7 +133,7 @@ class MigrateTests(unittest.TestCase):
         self.assertEqual(store3.rev, before)
 
     def test_import_queues_ops_in_github_mode(self):
-        store = Store(self.state, github_enabled=True, repo="richard-0417/lab-hub")
+        store = Store(self.state, github_enabled=True, repo="richard-0421/lab-hub")
         self.assertEqual(migrate.run_migration(self.cfg, store), 8)
         pending = store.pending()
         self.assertEqual(len(pending), 8)
@@ -179,7 +179,7 @@ class ReimportTests(unittest.TestCase):
     """A second import (new clone / empty state/, same labhub.db) must not
     bring back legacy items deleted on GitHub since the first one."""
 
-    REPO = "richard-0417/lab-hub"
+    REPO = "richard-0421/lab-hub"
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="labhub-reimport-")

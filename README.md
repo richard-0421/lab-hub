@@ -9,7 +9,7 @@ on the `data` branch of the same GitHub repo; both sides read and write it.
 
 - **Kiosk**: the Pi's screen shows `http://localhost:8000` fullscreen in Chromium.
 - **Lab network**: any laptop/phone on the lab LAN can open `http://<pi-ip>:8000` (no login).
-- **Anywhere**: <https://richard-0417.github.io/lab-hub/>. Paste a GitHub token once per browser to edit.
+- **Anywhere**: <https://richard-0421.github.io/lab-hub/>. Paste a GitHub token once per browser to edit.
 
 What's on the board:
 
@@ -29,7 +29,7 @@ itself (its own folder and GUI) is unaffected.
 ## How sync works
 
 ```
-                 richard-0417/lab-hub  (public)
+                 richard-0421/lab-hub  (public)
  ┌─────────────────────────────────────────────────────────────┐
  │ branch main  code ──► Actions ──► GitHub Pages ─────────────┼──┐
  │ branch data  board.json  (tasks, requests, notes)           │  │
@@ -75,7 +75,7 @@ Go to <https://github.com/new>:
 
 | field | value |
 |---|---|
-| Owner / name | **richard-0417 / lab-hub** |
+| Owner / name | **richard-0421 / lab-hub** |
 | Visibility | **Public** (GitHub Pages is free for public repos) |
 | README, .gitignore, license | **none**: the repo must be empty |
 
@@ -87,9 +87,9 @@ Push both, and push `data` **before** you install the Pi:
 
 ```bash
 cd ~/Desktop/"All the Programs/Ras Dashboard/lab-hub-new"
-git remote add origin https://github.com/richard-0417/lab-hub.git
+git remote add origin https://github.com/richard-0421/lab-hub.git
 #   (if it says "remote origin already exists":
-#    git remote set-url origin https://github.com/richard-0417/lab-hub.git)
+#    git remote set-url origin https://github.com/richard-0421/lab-hub.git)
 git push -u origin main          # code: main becomes the default branch
 git push origin data             # the board
 ```
@@ -105,7 +105,7 @@ allowed to update workflows. Any of these works:
 
 - the GitHub CLI: `brew install gh && gh auth login` (GitHub.com, HTTPS, log in
   with a browser). It includes the workflow permission.
-- GitHub Desktop, signed in as richard-0417.
+- GitHub Desktop, signed in as richard-0421.
 - a *classic* personal access token with the `repo` and `workflow` scopes.
 
 The fine-grained board tokens from step 4 never need the workflow permission.
@@ -120,7 +120,7 @@ before Pages was switched on, so open the **Actions** tab → **Deploy to GitHub
 Pages** → **Run workflow** (or **Re-run all jobs** on the failed run). After
 about a minute the site is live at:
 
-**<https://richard-0417.github.io/lab-hub/>**
+**<https://richard-0421.github.io/lab-hub/>**
 
 ### 4. Create tokens (fine-grained personal access tokens)
 
@@ -130,7 +130,7 @@ Open <https://github.com/settings/personal-access-tokens/new> and set:
 |---|---|
 | Token name | something you'll recognise later, e.g. `lab-hub pi`, `lab-hub mei-laptop` |
 | Expiration | about 1 year. Put a reminder in your calendar for the Pi's token |
-| Resource owner | **richard-0417** |
+| Resource owner | **richard-0421** |
 | Repository access | **Only select repositories → lab-hub** |
 | Permissions → Repository permissions | **Contents: Read and write**. "Metadata: Read-only" is added automatically. Nothing else. |
 
@@ -152,11 +152,11 @@ device and are pushed once it has a new token:
 
 ### 5. Connect a browser
 
-Open **<https://richard-0417.github.io/lab-hub/>**. The first time, a connect
+Open **<https://richard-0421.github.io/lab-hub/>**. The first time, a connect
 dialog asks for:
 
 - **Your name**: shown on tasks you create and in the board's commit messages
-- **Repository** (`richard-0417/lab-hub`), **Branch** (`data`) and **File**
+- **Repository** (`richard-0421/lab-hub`), **Branch** (`data`) and **File**
   (`board.json`): already filled in
 - **Token**: from step 4
 
@@ -169,8 +169,8 @@ note. **View read-only** opens the board without a token: because the repo is
 public, anyone can look, reading GitHub's cached copy of `board.json`, which
 can be up to 5 minutes old.
 
-The token is saved in this browser's storage for `richard-0417.github.io` and
-sent only to `api.github.com`. Any page served from `richard-0417.github.io`
+The token is saved in this browser's storage for `richard-0421.github.io` and
+sent only to `api.github.com`. Any page served from `richard-0421.github.io`
 could read it, so only publish trusted Pages sites under that account, use
 **Forget token** (sync pill) on shared computers, and revoke the token on
 GitHub if a device is lost.
@@ -206,12 +206,12 @@ Optional hardening, if you want it later:
   on GitHub instead of pushing to `main`. (Checked against GitHub's
   documentation, not yet tried on this repo.)
 - **Move the board to a separate private repo.** Create an empty private repo
-  (e.g. `richard-0417/lab-hub-data`), push the board there
-  (`git remote add board https://github.com/richard-0417/lab-hub-data.git &&
+  (e.g. `richard-0421/lab-hub-data`), push the board there
+  (`git remote add board https://github.com/richard-0421/lab-hub-data.git &&
   git push -u board data`), make tokens for **that repo only**, run
-  `./scripts/install-pi.sh --repo richard-0417/lab-hub-data` on the Pi, and set
+  `./scripts/install-pi.sh --repo richard-0421/lab-hub-data` on the Pi, and set
   **Repository** to it in each browser's settings (or share
-  `https://richard-0417.github.io/lab-hub/?repo=richard-0417/lab-hub-data`,
+  `https://richard-0421.github.io/lab-hub/?repo=richard-0421/lab-hub-data`,
   which pre-fills a browser's first connect). Then the board is private and a
   board token can't touch the code. The connect dialog and `install-pi.sh`
   warn if such a token can still write `lab-hub`.
@@ -228,7 +228,7 @@ Chromium package is called `chromium`.
 ### Fresh install
 
 ```bash
-git clone --single-branch https://github.com/richard-0417/lab-hub.git ~/lab-hub
+git clone --single-branch https://github.com/richard-0421/lab-hub.git ~/lab-hub
 cd ~/lab-hub && ./scripts/install-pi.sh
 ```
 
@@ -239,13 +239,13 @@ do).
 
 Run the script as your normal desktop user, **not** with `sudo`; it asks for
 sudo when it needs it. It asks for the dashboard title, the GitHub repo that
-holds the board (default `richard-0417/lab-hub`), the Pi's token (input hidden; leave
+holds the board (default `richard-0421/lab-hub`), the Pi's token (input hidden; leave
 it blank to keep the board on the Pi only) and an Outlook `.ics` URL. It is
 safe to re-run at any time, for example to change the token or calendar.
 
 It then tests the token against GitHub and prints one of:
 
-- *OK: the token can read and write richard-0417/lab-hub*. To prove the token
+- *OK: the token can read and write richard-0421/lab-hub*. To prove the token
   can write, it creates one small unreferenced git blob in the repo (always the
   same one). This changes no branch, file or history.
 - a problem: the token was rejected, can't see the repo, or can read but not
@@ -283,7 +283,7 @@ Replace it with a clone and import its data:
 ```bash
 sudo systemctl stop lab-hub
 mv ~/lab-hub ~/lab-hub-old
-git clone --single-branch https://github.com/richard-0417/lab-hub.git ~/lab-hub
+git clone --single-branch https://github.com/richard-0421/lab-hub.git ~/lab-hub
 cd ~/lab-hub && ./scripts/install-pi.sh --from ~/lab-hub-old
 ```
 
@@ -342,7 +342,7 @@ other than `~/lab-hub`, adjust the paths.)
   address, `localhost` and its own host name (add other names to
   `allowed_hosts`), and refuses edits that a browser marks as coming from
   another site.
-- **From anywhere**: <https://richard-0417.github.io/lab-hub/> with your
+- **From anywhere**: <https://richard-0421.github.io/lab-hub/> with your
   token. Changes reach the Pi within about 15 s. A read-only view (no token)
   can lag up to 5 minutes, because it reads GitHub's cached copy of the file.
 - **Small screens** (the 7" 800×480 touchscreen, 1024×600): the task board
@@ -457,14 +457,14 @@ and the installer looking at port 8000. For a one-off run on another port, use
 | `theme` | `"dark"` | `dark`, `light` or `auto`. The kiosk default; each browser can override it |
 | `calendar_ics` | `""` | published Outlook `.ics` URL (or a local `.ics` path). In Outlook on the web: Settings → Calendar → Shared calendars → Publish a calendar → copy the ICS link |
 | `calendar_max_events` | `8` | events shown |
-| `github_repo` | `""` | `owner/name` of the repo holding the board, normally `richard-0417/lab-hub` (the installer's default). Empty = Pi-only (no sync) |
+| `github_repo` | `""` | `owner/name` of the repo holding the board, normally `richard-0421/lab-hub` (the installer's default). Empty = Pi-only (no sync) |
 | `github_branch` | `"data"` | branch with the board file |
 | `github_path` | `"board.json"` | board file path on that branch |
 | `github_token` | `""` | fine-grained token with Contents: read & write on that repo. Prefer env `LABHUB_GITHUB_TOKEN`. Never sent to browsers |
 | `github_api` | `"https://api.github.com"` | override for tests (mock server) |
 | `sync_interval` | `15` | seconds between pulls from GitHub |
 | `client_name` | `"lab-pi"` | name used in commit messages and for edits made on the kiosk |
-| `pages_url` | `""` | the "Edit from anywhere" link in the kiosk footer. When empty, the server uses the Pages site of the repo this folder was cloned from (git `origin`), i.e. `https://richard-0417.github.io/lab-hub/`; with a separate data repo it adds `?repo=<github_repo>`. Set it by hand for anything else (the installer keeps a hand-set value) |
+| `pages_url` | `""` | the "Edit from anywhere" link in the kiosk footer. When empty, the server uses the Pages site of the repo this folder was cloned from (git `origin`), i.e. `https://richard-0421.github.io/lab-hub/`; with a separate data repo it adds `?repo=<github_repo>`. Set it by hand for anything else (the installer keeps a hand-set value) |
 | `state_dir` | `"state"` | local sync state (cached board + unsent edits) |
 | `db_path` | `"labhub.db"` | old SQLite file to import once |
 | `allowed_hosts` | `""` | extra host names people use to open the Pi in a browser, e.g. `["labpi.example.edu"]` or `"labpi.example.edu, .lab.example.edu"` (a leading `.` allows all subdomains; `"*"` turns the check off). IP addresses, `localhost` and the Pi's own host name (also `<name>.local`) always work |
@@ -504,7 +504,7 @@ a fresh demo board every time:
 | address | what |
 |---|---|
 | <http://127.0.0.1:8000/> | the dashboard as the Pi runs it, syncing to the fake GitHub |
-| <http://127.0.0.1:8001/?api=http://127.0.0.1:9010&repo=richard-0417/lab-hub> | the Pages copy; connect with token `dev-token` |
+| <http://127.0.0.1:8001/?api=http://127.0.0.1:9010&repo=richard-0421/lab-hub> | the Pages copy; connect with token `dev-token` |
 | <http://127.0.0.1:9010/_mock/file?branch=data&path=board.json> | the board file on the fake GitHub |
 
 Edit in one tab and watch the change appear in the other. In the Claude
@@ -527,15 +527,15 @@ repo and the installer's token check against a fake GitHub.
 ```bash
 # terminal 1: a fake GitHub API with an in-memory repo (see --help for
 #             --private, --no-data-branch, --empty)
-.venv/bin/python tests/mock_github.py --port 9010 --repo richard-0417/lab-hub --token test-token
+.venv/bin/python tests/mock_github.py --port 9010 --repo richard-0421/lab-hub --token test-token
 
 # terminal 2: the Pi server, syncing to the mock
-LABHUB_GITHUB_API=http://127.0.0.1:9010 LABHUB_GITHUB_REPO=richard-0417/lab-hub \
+LABHUB_GITHUB_API=http://127.0.0.1:9010 LABHUB_GITHUB_REPO=richard-0421/lab-hub \
 LABHUB_GITHUB_TOKEN=test-token LABHUB_STATE_DIR=/tmp/lab-hub-mock-state ./run.sh --port 8001
 
 # terminal 3 (optional): the Pages copy in "github" mode, against the same mock
 python3 -m http.server 8080 --directory static
-open "http://localhost:8080/?api=http://127.0.0.1:9010&repo=richard-0417/lab-hub"   # token: test-token
+open "http://localhost:8080/?api=http://127.0.0.1:9010&repo=richard-0421/lab-hub"   # token: test-token
 ```
 
 Edit on <http://localhost:8001> and on <http://localhost:8080> and watch the
@@ -562,11 +562,11 @@ first column also appear in `/api/sync` on the Pi.
 | `off` (*GitHub sync off*) | Pi: no repo or no token configured | `./scripts/install-pi.sh` |
 | `readonly` (*Read-only*) | Pages site without a token: you can look but not edit | connect with a token (Settings) |
 | `error`: *GitHub token rejected (expired or revoked?)* | token expired, revoked or mistyped | new token: see [step 4](#4-create-tokens-fine-grained-personal-access-tokens) |
-| `error`: *repo not found, or the token can't see it* | wrong repo name (normally `richard-0417/lab-hub`), or the token wasn't given that repo | check the name in Settings; edit the token's repository access |
+| `error`: *repo not found, or the token can't see it* | wrong repo name (normally `richard-0421/lab-hub`), or the token wasn't given that repo | check the name in Settings; edit the token's repository access |
 | `error`: *GitHub refused access - check the token has Contents: read & write…* | token lacks write permission on the repo | edit the token → Contents: Read and write |
 | `error`: *the GitHub repo has no commits yet - push the Lab Hub code to it first…* | the repo on GitHub is still empty | do [step 2](#2-push-from-the-mac) |
 | `off` with a reason starting *config:* | `github_repo`, `github_branch` or `github_path` in `config.json` is malformed | fix it and `sudo systemctl restart lab-hub` |
-| `error`: *GitHub rate limit reached* | **With a token**: over 5,000 API calls/hour. All tokens act as richard-0417, so they share that limit; "board unchanged" checks don't count. **Without a token**: GitHub's API allows only 60 calls/hour per IP address, shared by everyone on that network (a whole lab or campus can share one address), and every call counts. Read-only tabs normally read GitHub's cached file copy instead, which doesn't use that limit, so this shows up only when that copy can't be reached (the tab then falls back to the API, about 40 calls an hour per tab) | wait until the reset time shown. Read-only viewers: connect with a token, or close extra read-only tabs. With tokens: look for a runaway script or dozens of open tabs |
+| `error`: *GitHub rate limit reached* | **With a token**: over 5,000 API calls/hour. All tokens act as richard-0421, so they share that limit; "board unchanged" checks don't count. **Without a token**: GitHub's API allows only 60 calls/hour per IP address, shared by everyone on that network (a whole lab or campus can share one address), and every call counts. Read-only tabs normally read GitHub's cached file copy instead, which doesn't use that limit, so this shows up only when that copy can't be reached (the tab then falls back to the API, about 40 calls an hour per tab) | wait until the reset time shown. Read-only viewers: connect with a token, or close extra read-only tabs. With tokens: look for a runaway script or dozens of open tabs |
 | `error`: *board.json on GitHub is not valid JSON* | someone broke `board.json` by hand; nobody pushes until it's fixed | fix or revert it on the `data` branch |
 
 ### On the Pi
@@ -595,7 +595,7 @@ curl -s localhost:8000/api/sync          # sync status as JSON (never shows the 
   was installed by an older `install-pi.sh`. Re-run `./scripts/install-pi.sh`.
 - **Token problems**: `./scripts/install-pi.sh` tests the saved token (reading
   and writing the repo) and prints *OK* or what is wrong. Fine-grained tokens
-  need **resource owner richard-0417**, `lab-hub` selected, and **Contents:
+  need **resource owner richard-0421**, `lab-hub` selected, and **Contents:
   Read and write**.
 - **Kiosk doesn't start on Wayland**: check
   `ls ~/.config/autostart/lab-hub-kiosk.desktop`. Run

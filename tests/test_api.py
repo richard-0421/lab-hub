@@ -143,7 +143,7 @@ class LocalApiTests(_ApiBase):
     @classmethod
     def make_env(cls, tmp):
         # repo set but no token -> local-only
-        return {"LABHUB_GITHUB_REPO": "richard-0417/lab-hub"}
+        return {"LABHUB_GITHUB_REPO": "richard-0421/lab-hub"}
 
     def test_config(self):
         status, headers, body = get_json(self.base + "/api/config")
@@ -157,11 +157,11 @@ class LocalApiTests(_ApiBase):
         self.assertIsNone(github.pop("last_error", None))  # only set for an unusable repo/branch/path
         self.assertEqual(github, {
             "enabled": False,
-            "repo": "richard-0417/lab-hub",
+            "repo": "richard-0421/lab-hub",
             "branch": "data",
             "path": "board.json",
-            "pages_url": "https://richard-0417.github.io/lab-hub/",
-            "file_url": "https://github.com/richard-0417/lab-hub/blob/data/board.json",
+            "pages_url": "https://richard-0421.github.io/lab-hub/",
+            "file_url": "https://github.com/richard-0421/lab-hub/blob/data/board.json",
         })
         self.assertEqual(body["calendar"], {"configured": False})
 
@@ -343,12 +343,12 @@ class BadGitHubConfigApiTests(_ApiBase):
 
     @classmethod
     def prepare(cls, tmp):
-        cls.mock = MockGitHub(repo="richard-0417/lab-hub", token=SECRET).start()
+        cls.mock = MockGitHub(repo="richard-0421/lab-hub", token=SECRET).start()
 
     @classmethod
     def make_env(cls, tmp):
         return {
-            "LABHUB_GITHUB_REPO": "richard-0417/lab-hub",
+            "LABHUB_GITHUB_REPO": "richard-0421/lab-hub",
             "LABHUB_GITHUB_TOKEN": SECRET,
             "LABHUB_GITHUB_BRANCH": "x..y",
             "LABHUB_GITHUB_API": cls.mock.url,
@@ -363,7 +363,7 @@ class BadGitHubConfigApiTests(_ApiBase):
         self.assertNotIn(SECRET.encode(), data)
         github = json.loads(data)["github"]
         self.assertIs(github["enabled"], False)
-        self.assertEqual(github["repo"], "richard-0417/lab-hub")
+        self.assertEqual(github["repo"], "richard-0421/lab-hub")
         self.assertEqual(github["branch"], "x..y")  # shown as configured
         _, _, sync = get_json(self.base + "/api/sync")
         self.assertIs(sync["enabled"], False)
@@ -399,7 +399,7 @@ class BadGitHubConfigApiTests(_ApiBase):
 class GitHubApiTests(_ApiBase):
     @classmethod
     def prepare(cls, tmp):
-        cls.mock = MockGitHub(repo="richard-0417/lab-hub", token=SECRET).start()
+        cls.mock = MockGitHub(repo="richard-0421/lab-hub", token=SECRET).start()
         # a legacy db is imported (and pushed) at startup
         con = sqlite3.connect(os.path.join(tmp, "labhub.db"))
         con.executescript("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, "
@@ -411,7 +411,7 @@ class GitHubApiTests(_ApiBase):
     @classmethod
     def make_env(cls, tmp):
         return {
-            "LABHUB_GITHUB_REPO": "richard-0417/lab-hub",
+            "LABHUB_GITHUB_REPO": "richard-0421/lab-hub",
             "LABHUB_GITHUB_TOKEN": "  %s \n" % SECRET,
             "LABHUB_GITHUB_API": cls.mock.url,
             "LABHUB_SYNC_INTERVAL": "60",
@@ -443,7 +443,7 @@ class GitHubApiTests(_ApiBase):
         self.assertTrue(wait_until(lambda: get_json(self.base + "/api/sync")[2]["pending"] == 0))
         _, _, sync = get_json(self.base + "/api/sync")
         self.assertEqual(sync["state"], "ok")
-        self.assertEqual(sync["repo"], "richard-0417/lab-hub")
+        self.assertEqual(sync["repo"], "richard-0421/lab-hub")
 
     def test_manual_sync_pulls_web_edit(self):
         self.assertTrue(wait_until(lambda: self.mock.get_file_text("data", "board.json") is not None))
@@ -494,7 +494,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_file_alias_env_and_coercion(self):
         cfg = self.load(
-            {"subgroup_name": "Old Name", "port": "8100", "github_repo": "https://github.com/Richard-0417/lab-hub.git",
+            {"subgroup_name": "Old Name", "port": "8100", "github_repo": "https://github.com/Richard-0421/lab-hub.git",
              "github_token": "file-token", "theme": "LIGHT", "data_dir": "x", "calendar_ics": "cal/lab.ics"},
             {"LABHUB_PORT": "9000", "LABHUB_SYNC_INTERVAL": "abc", "LABHUB_GITHUB_TOKEN": " ghp_ab\ncd \t",
              "LABHUB_CALENDAR_MAX_EVENTS": "3", "LABHUB_STATE_DIR": "/tmp/labhub-abs-state"},
@@ -504,8 +504,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg["sync_interval"], 15)
         self.assertEqual(cfg["calendar_max_events"], 3)
         self.assertEqual(cfg["github_token"], "ghp_abcd")
-        self.assertEqual(cfg["github_repo"], "Richard-0417/lab-hub")
-        self.assertEqual(cfg["pages_url"], "https://richard-0417.github.io/lab-hub/")
+        self.assertEqual(cfg["github_repo"], "Richard-0421/lab-hub")
+        self.assertEqual(cfg["pages_url"], "https://richard-0421.github.io/lab-hub/")
         self.assertEqual(cfg["theme"], "light")
         self.assertEqual(cfg["state_dir"], "/tmp/labhub-abs-state")
         self.assertEqual(cfg["calendar_ics"], os.path.join(self.tmp, "cal", "lab.ics"))
@@ -524,8 +524,8 @@ class ConfigTests(unittest.TestCase):
         cfg = self.load({"github_repo": "not a repo", "github_token": "t"})
         self.assertEqual(cfg["github_repo"], "")
         self.assertFalse(github_enabled(cfg))
-        cfg = self.load({"github_repo": "richard-0417/richard-0417.github.io"})
-        self.assertEqual(cfg["pages_url"], "https://richard-0417.github.io/")
+        cfg = self.load({"github_repo": "richard-0421/richard-0421.github.io"})
+        self.assertEqual(cfg["pages_url"], "https://richard-0421.github.io/")
         cfg = self.load({"pages_url": "https://lab.example.org/", "github_repo": "a/b", "theme": "neon"})
         self.assertEqual(cfg["pages_url"], "https://lab.example.org/")
         self.assertEqual(cfg["theme"], "dark")
@@ -538,14 +538,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg["allowed_hosts"], ["labpi.example.org", "*"])
 
     def test_invalid_github_settings_turn_sync_off(self):
-        good = {"github_repo": "richard-0417/lab-hub", "github_token": "t"}
+        good = {"github_repo": "richard-0421/lab-hub", "github_token": "t"}
         with self.assertLogs("labhub.config", level="WARNING") as logs:
             cfg = self.load(dict(good, github_branch="x..y"))
         self.assertEqual(github_config_error(cfg), "config: github_branch 'x..y' is not a valid branch name")
         self.assertEqual(len(logs.records), 1)
         self.assertIn("config: github_branch 'x..y' is not a valid branch name; GitHub sync is off", logs.output[0])
         self.assertFalse(github_enabled(cfg))
-        self.assertEqual((cfg["github_repo"], cfg["github_branch"]), ("richard-0417/lab-hub", "x..y"))
+        self.assertEqual((cfg["github_repo"], cfg["github_branch"]), ("richard-0421/lab-hub", "x..y"))
         with self.assertLogs("labhub.config", level="WARNING") as logs:
             cfg = self.load({"github_repo": "a/..", "github_token": SECRET})
         self.assertNotIn(SECRET, github_config_error(cfg) + "".join(logs.output))
@@ -555,8 +555,8 @@ class ConfigTests(unittest.TestCase):
                               "a b", "da~ta", "da:ta", "a\\b", "%2e%2e", "../main", "ref/./x", "dat\u00e4"],
             "github_path": ["../board.json", "..", "...", "a/./b.json", "a//b.json", "a b.json", "a\\b.json",
                             "%2e%2e/board.json", "a?b.json", "board.json#x"],
-            "github_repo": ["richard-0417/..", "../lab-hub", "./lab-hub", "a/b/c", "richard-0417/lab hub",
-                            "https://github.com/richard-0417/..", "richard-0417/lab-hub?x"],
+            "github_repo": ["richard-0421/..", "../lab-hub", "./lab-hub", "a/b/c", "richard-0421/lab hub",
+                            "https://github.com/richard-0421/..", "richard-0421/lab-hub?x"],
         }
         for key, values in bad.items():
             for value in values:
@@ -576,7 +576,7 @@ class ConfigTests(unittest.TestCase):
             cfg = self.load({"github_repo": "a/..", "github_branch": "b..", "github_path": "../c", "github_token": "t"})
         self.assertEqual(len(logs.records), 1)
         self.assertEqual(github_config_error(cfg), "; ".join([
-            "config: github_repo 'a/..' is not a valid repository (use owner/name, e.g. richard-0417/lab-hub)",
+            "config: github_repo 'a/..' is not a valid repository (use owner/name, e.g. richard-0421/lab-hub)",
             "config: github_branch 'b..' is not a valid branch name",
             "config: github_path '../c' is not a valid file path",
         ]))
@@ -589,12 +589,12 @@ class ConfigTests(unittest.TestCase):
         self.assertLess(len(msg), 160)
 
     def test_valid_github_settings(self):
-        good = {"github_repo": "richard-0417/lab-hub", "github_token": "t"}
+        good = {"github_repo": "richard-0421/lab-hub", "github_token": "t"}
         with mock.patch.object(app_config.log, "warning") as warn:
             for extra in ({}, {"github_branch": "feature/board-v2"}, {"github_branch": "v1.2"},
                           {"github_branch": "release_2026"}, {"github_path": "boards/lab.json"},
                           {"github_path": "/board.json/"}, {"github_path": ".github/board.json"},
-                          {"github_repo": "a_b/c.d"}, {"github_repo": "https://github.com/Richard-0417/Lab.Hub.git"}):
+                          {"github_repo": "a_b/c.d"}, {"github_repo": "https://github.com/Richard-0421/Lab.Hub.git"}):
                 cfg = self.load(dict(good, **extra))
                 self.assertEqual(github_config_error(cfg), "", extra)
                 self.assertTrue(github_enabled(cfg), extra)
@@ -606,16 +606,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(self.load(dict(good, github_path="/board.json/"))["github_path"], "board.json")
 
     def test_public_config_reports_the_config_error(self):
-        good = {"github_repo": "richard-0417/lab-hub", "github_token": SECRET}
+        good = {"github_repo": "richard-0421/lab-hub", "github_token": SECRET}
         gh = app_main.public_config(self.load(good))["github"]
         self.assertIsNone(gh["last_error"])
-        self.assertEqual(gh["file_url"], "https://github.com/richard-0417/lab-hub/blob/data/board.json")
+        self.assertEqual(gh["file_url"], "https://github.com/richard-0421/lab-hub/blob/data/board.json")
         self.assertIs(gh["enabled"], True)
         cases = {
             "github_path": ("a/../board.json", "config: github_path 'a/../board.json' is not a valid file path"),
             "github_branch": ("x..y", "config: github_branch 'x..y' is not a valid branch name"),
-            "github_repo": ("richard-0417/..", "config: github_repo 'richard-0417/..' is not a valid repository "
-                                               "(use owner/name, e.g. richard-0417/lab-hub)"),
+            "github_repo": ("richard-0421/..", "config: github_repo 'richard-0421/..' is not a valid repository "
+                                               "(use owner/name, e.g. richard-0421/lab-hub)"),
         }
         for key, (value, message) in cases.items():
             with self.assertLogs("labhub.config", level="WARNING"):
@@ -627,7 +627,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(gh["file_url"], "", key)  # never a link built from an unusable value
             self.assertNotIn(SECRET, json.dumps(body))
         # without a token sync is off too, but that is not a config error
-        gh = app_main.public_config(self.load({"github_repo": "richard-0417/lab-hub"}))["github"]
+        gh = app_main.public_config(self.load({"github_repo": "richard-0421/lab-hub"}))["github"]
         self.assertIsNone(gh["last_error"])
         self.assertTrue(gh["file_url"])
         self.assertIsNone(app_main.public_config(self.load({}))["github"]["last_error"])
@@ -644,46 +644,46 @@ class ConfigTests(unittest.TestCase):
 
     def test_pages_url_follows_the_code_repo(self):
         # README "Privacy": the board lives in a private data repo, the site in the code repo
-        self.write_git("git@github.com:richard-0417/lab-hub.git")
-        self.assertEqual(git_origin_repo(self.tmp), "richard-0417/lab-hub")
-        cfg = self.load({"github_repo": "richard-0417/lab-hub-data"})
-        self.assertEqual(cfg["pages_url"], "https://richard-0417.github.io/lab-hub/?repo=richard-0417/lab-hub-data")
-        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub"})["pages_url"],
-                         "https://richard-0417.github.io/lab-hub/")
+        self.write_git("git@github.com:richard-0421/lab-hub.git")
+        self.assertEqual(git_origin_repo(self.tmp), "richard-0421/lab-hub")
+        cfg = self.load({"github_repo": "richard-0421/lab-hub-data"})
+        self.assertEqual(cfg["pages_url"], "https://richard-0421.github.io/lab-hub/?repo=richard-0421/lab-hub-data")
+        self.assertEqual(self.load({"github_repo": "richard-0421/lab-hub"})["pages_url"],
+                         "https://richard-0421.github.io/lab-hub/")
         self.assertEqual(self.load({"github_repo": "a/b", "pages_url": "https://lab.example.org/"})["pages_url"],
                          "https://lab.example.org/")
 
     def test_pages_url_single_repo(self):
         # the default setup: one public repo, main = code + Pages, data = board.json
-        for origin in ("https://github.com/richard-0417/lab-hub.git", "https://github.com/richard-0417/lab-hub",
-                       "git@github.com:Richard-0417/lab-hub.git", "ssh://git@github.com/richard-0417/lab-hub.git"):
+        for origin in ("https://github.com/richard-0421/lab-hub.git", "https://github.com/richard-0421/lab-hub",
+                       "git@github.com:Richard-0421/lab-hub.git", "ssh://git@github.com/richard-0421/lab-hub.git"):
             self.write_git(origin)
-            for repo in ("richard-0417/lab-hub", "https://github.com/richard-0417/lab-hub.git"):
+            for repo in ("richard-0421/lab-hub", "https://github.com/richard-0421/lab-hub.git"):
                 cfg = self.load({"github_repo": repo, "github_branch": "data"})
-                self.assertEqual(cfg["pages_url"], "https://richard-0417.github.io/lab-hub/", (origin, repo))
+                self.assertEqual(cfg["pages_url"], "https://richard-0421.github.io/lab-hub/", (origin, repo))
         # github_repo set but no git origin (no checkout, or no "origin" remote): derived from github_repo
         with open(os.path.join(self.tmp, ".git", "config"), "w") as f:
             f.write('[remote "upstream"]\n\turl = https://github.com/someone/else.git\n')
         self.assertEqual(git_origin_repo(self.tmp), "")
-        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub"})["pages_url"],
-                         "https://richard-0417.github.io/lab-hub/")
+        self.assertEqual(self.load({"github_repo": "richard-0421/lab-hub"})["pages_url"],
+                         "https://richard-0421.github.io/lab-hub/")
         shutil.rmtree(os.path.join(self.tmp, ".git"))
-        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub"})["pages_url"],
-                         "https://richard-0417.github.io/lab-hub/")
-        self.assertEqual(self.load(env={"LABHUB_GITHUB_REPO": "richard-0417/lab-hub"})["pages_url"],
-                         "https://richard-0417.github.io/lab-hub/")
+        self.assertEqual(self.load({"github_repo": "richard-0421/lab-hub"})["pages_url"],
+                         "https://richard-0421.github.io/lab-hub/")
+        self.assertEqual(self.load(env={"LABHUB_GITHUB_REPO": "richard-0421/lab-hub"})["pages_url"],
+                         "https://richard-0421.github.io/lab-hub/")
         # no repo -> no link; an explicit one always wins
         self.assertEqual(self.load({})["pages_url"], "")
-        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub", "pages_url": "https://x.example/"})
+        self.assertEqual(self.load({"github_repo": "richard-0421/lab-hub", "pages_url": "https://x.example/"})
                          ["pages_url"], "https://x.example/")
 
     def test_pages_url_origin_forms(self):
-        self.write_git("https://user:secret@github.com/Richard-0417/lab-hub", gitfile=True)
-        self.assertEqual(git_origin_repo(self.tmp), "Richard-0417/lab-hub")
+        self.write_git("https://user:secret@github.com/Richard-0421/lab-hub", gitfile=True)
+        self.assertEqual(git_origin_repo(self.tmp), "Richard-0421/lab-hub")
         self.write_git("https://gitlab.com/x/lab-hub.git", gitfile=True)
         self.assertEqual(git_origin_repo(self.tmp), "")
-        self.assertEqual(self.load({"github_repo": "richard-0417/lab-hub-data"})["pages_url"],
-                         "https://richard-0417.github.io/lab-hub-data/")
+        self.assertEqual(self.load({"github_repo": "richard-0421/lab-hub-data"})["pages_url"],
+                         "https://richard-0421.github.io/lab-hub-data/")
         self.assertEqual(git_origin_repo(os.path.join(self.tmp, "nowhere")), "")
 
 

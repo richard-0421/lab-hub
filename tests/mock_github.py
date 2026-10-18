@@ -40,7 +40,7 @@ HTTP control endpoints (handy from curl during manual tests; no auth):
     GET  /_mock/log
 
 Run:
-    python tests/mock_github.py --port 9010 --repo richard-0417/lab-hub \\
+    python tests/mock_github.py --port 9010 --repo richard-0421/lab-hub \\
         --token test-token [--private] [--no-data-branch | --empty] [--seed board.json]
 """
 import argparse
@@ -89,7 +89,7 @@ def _tree_path_ok(path):
 class MockGitHub(object):
     def __init__(
         self,
-        repo="richard-0417/lab-hub",
+        repo="richard-0421/lab-hub",
         token="test-token",
         private=False,
         data_branch="data",
@@ -823,7 +823,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Mock GitHub API for Lab Hub tests")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9010)
-    ap.add_argument("--repo", default="richard-0417/lab-hub")
+    ap.add_argument("--repo", default="richard-0421/lab-hub")
     ap.add_argument("--token", default="test-token")
     ap.add_argument("--branch", default="data", help="data branch name")
     ap.add_argument("--path", default="board.json")

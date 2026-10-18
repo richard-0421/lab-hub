@@ -8,7 +8,7 @@
 //                   Without a token it only reads, from
 //                   raw.githubusercontent.com (no API rate limit per IP).
 //
-// Default layout: ONE public repo, richard-0417/lab-hub — branch `main` holds
+// Default layout: ONE public repo, richard-0421/lab-hub — branch `main` holds
 // the code (and is published to Pages), branch `data` holds board.json. So the
 // page's own repo is also the board repo. Repo, branch and path are all
 // settings, so a separate (e.g. private) data repo works too; it is optional.
@@ -35,7 +35,7 @@ import {
   validateOp,
 } from "./board.js";
 
-export const DEFAULT_REPO = "richard-0417/lab-hub"; // code on `main`, board on `data`
+export const DEFAULT_REPO = "richard-0421/lab-hub"; // code on `main`, board on `data`
 export const DEFAULT_BRANCH = "data";
 export const DEFAULT_PATH = "board.json";
 export const DEFAULT_API = "https://api.github.com";
@@ -760,7 +760,7 @@ export function pagesCodeRepo(loc) {
  * Defaults for this page. The default setup is ONE repo — code on `main`,
  * board.json on the `data` branch — so the board repo is the repo the page
  * is published from: "<owner>.github.io/<repo>/…" => "<owner>/<repo>" (root
- * site => "<owner>/<owner>.github.io"); anywhere else "richard-0417/lab-hub".
+ * site => "<owner>/<owner>.github.io"); anywhere else "richard-0421/lab-hub".
  * Branch "data", path "board.json".
  * ?repo= ?branch= ?path= ?api= prefill these defaults (they never override
  * saved settings — use `loadGitHubSettings() || defaultGitHubSettings()`);

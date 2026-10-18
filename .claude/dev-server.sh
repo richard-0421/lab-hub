@@ -15,7 +15,7 @@ cleanup() { kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null; }
 trap cleanup EXIT INT TERM
 
 "$PY" tests/mock_github.py --host 127.0.0.1 --port 9010 \
-  --repo richard-0417/lab-hub --token dev-token > "$DEV/mock.log" 2>&1 &
+  --repo richard-0421/lab-hub --token dev-token > "$DEV/mock.log" 2>&1 &
 pids+=($!)
 "$PY" -m http.server --bind 127.0.0.1 --directory static 8001 > "$DEV/pages.log" 2>&1 &
 pids+=($!)
@@ -25,7 +25,7 @@ env LABHUB_CONFIG=/nonexistent-config.json \
     LABHUB_DB_PATH=/nonexistent.db \
     LABHUB_NAME="Lab Hub (test)" \
     LABHUB_CALENDAR_ICS="$PWD/$DEV/cal.ics" \
-    LABHUB_GITHUB_REPO=richard-0417/lab-hub \
+    LABHUB_GITHUB_REPO=richard-0421/lab-hub \
     LABHUB_GITHUB_TOKEN=dev-token \
     LABHUB_GITHUB_API=http://127.0.0.1:9010 \
     LABHUB_SYNC_INTERVAL=5 \
@@ -39,6 +39,6 @@ done
 "$PY" .claude/dev-seed.py http://127.0.0.1:8000 "$PWD/$DEV/cal.ics"
 echo
 echo "Dashboard (Pi mode):     http://127.0.0.1:8000/"
-echo "GitHub Pages mode:       http://127.0.0.1:8001/?api=http://127.0.0.1:9010&repo=richard-0417/lab-hub   (token: dev-token)"
+echo "GitHub Pages mode:       http://127.0.0.1:8001/?api=http://127.0.0.1:9010&repo=richard-0421/lab-hub   (token: dev-token)"
 echo "Mock GitHub board.json:  http://127.0.0.1:9010/_mock/file?branch=data&path=board.json"
 wait

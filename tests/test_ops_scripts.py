@@ -275,7 +275,7 @@ class InstallHelperCheckTest(unittest.TestCase):
 
 
 class InstallHelperPagesTest(unittest.TestCase):
-    ORIGIN = "https://github.com/richard-0417/lab-hub.git"
+    ORIGIN = "https://github.com/richard-0421/lab-hub.git"
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -295,27 +295,27 @@ class InstallHelperPagesTest(unittest.TestCase):
             return json.load(f)
 
     def test_default_repo_is_the_code_repo(self):
-        self.assertEqual(self.helper("show").splitlines()[1], "richard-0417/lab-hub")
+        self.assertEqual(self.helper("show").splitlines()[1], "richard-0421/lab-hub")
 
     def test_single_repo_stores_no_pages_url_and_prints_the_plain_site(self):
-        self.helper("write", LH_REPO="richard-0417/lab-hub", LH_ORIGIN=self.ORIGIN,
+        self.helper("write", LH_REPO="richard-0421/lab-hub", LH_ORIGIN=self.ORIGIN,
                     LH_TOKEN_ACTION="set", LH_TOKEN=TOKEN)
         saved = self.saved()
-        self.assertEqual(saved["github_repo"], "richard-0417/lab-hub")
+        self.assertEqual(saved["github_repo"], "richard-0421/lab-hub")
         self.assertEqual(saved["github_token"], TOKEN)
         self.assertNotIn("pages_url", saved)            # the server derives it
         self.assertEqual(stat.S_IMODE(os.stat(self.cfg).st_mode), 0o600)
-        site = "https://richard-0417.github.io/lab-hub/"
+        site = "https://richard-0421.github.io/lab-hub/"
         self.assertEqual(load_config(base_dir=self.dir, config_path=self.cfg, environ={})["pages_url"], site)
         self.assertEqual(self.helper("pages", LH_ORIGIN=self.ORIGIN).strip(), site)
         show = self.helper("show")
         self.assertNotIn(TOKEN, show)
-        self.assertEqual(show.splitlines()[1:], ["richard-0417/lab-hub", "", "1"])
+        self.assertEqual(show.splitlines()[1:], ["richard-0421/lab-hub", "", "1"])
 
     def test_optional_separate_data_repo_stores_the_code_repos_pages_url(self):
-        self.helper("write", LH_REPO="richard-0417/lab-hub-data", LH_ORIGIN=self.ORIGIN,
+        self.helper("write", LH_REPO="richard-0421/lab-hub-data", LH_ORIGIN=self.ORIGIN,
                     LH_TOKEN_ACTION="set", LH_TOKEN=TOKEN)
-        want = "https://richard-0417.github.io/lab-hub/?repo=richard-0417/lab-hub-data"
+        want = "https://richard-0421.github.io/lab-hub/?repo=richard-0421/lab-hub-data"
         self.assertEqual(self.saved()["pages_url"], want)
         self.assertEqual(stat.S_IMODE(os.stat(self.cfg).st_mode), 0o600)
         # the server (kiosk footer) uses it as is, not github.io/lab-hub-data/
@@ -325,33 +325,33 @@ class InstallHelperPagesTest(unittest.TestCase):
 
         # moving the board back into the code repo clears the stored URL,
         # so the server derives https://<owner>.github.io/<repo>/ again
-        self.helper("write", LH_REPO="richard-0417/lab-hub", LH_ORIGIN=self.ORIGIN)
+        self.helper("write", LH_REPO="richard-0421/lab-hub", LH_ORIGIN=self.ORIGIN)
         self.assertEqual(self.saved()["pages_url"], "")
         self.assertEqual(load_config(base_dir=self.dir, config_path=self.cfg, environ={})["pages_url"],
-                         "https://richard-0417.github.io/lab-hub/")
+                         "https://richard-0421.github.io/lab-hub/")
         self.assertEqual(self.helper("pages", LH_ORIGIN=self.ORIGIN).strip(),
-                         "https://richard-0417.github.io/lab-hub/")
+                         "https://richard-0421.github.io/lab-hub/")
 
     def test_ssh_origin_and_owner_case(self):
-        self.helper("write", LH_REPO="Richard-0417/lab-hub-data", LH_ORIGIN="git@github.com:Richard-0417/lab-hub.git")
+        self.helper("write", LH_REPO="Richard-0421/lab-hub-data", LH_ORIGIN="git@github.com:Richard-0421/lab-hub.git")
         self.assertEqual(self.saved()["pages_url"],
-                         "https://richard-0417.github.io/lab-hub/?repo=Richard-0417/lab-hub-data")
+                         "https://richard-0421.github.io/lab-hub/?repo=Richard-0421/lab-hub-data")
         # same repo in another letter case is still the single-repo setup
-        self.helper("write", LH_REPO="richard-0417/LAB-HUB", LH_ORIGIN="git@github.com:Richard-0417/lab-hub.git")
+        self.helper("write", LH_REPO="richard-0421/LAB-HUB", LH_ORIGIN="git@github.com:Richard-0421/lab-hub.git")
         self.assertEqual(self.saved()["pages_url"], "")
 
     def test_hand_set_pages_url_is_kept(self):
         with open(self.cfg, "w", encoding="utf-8") as f:
             json.dump({"pages_url": "https://lab.example.org/board/"}, f)
-        self.helper("write", LH_REPO="richard-0417/lab-hub", LH_ORIGIN="https://github.com/richard-0417/lab-hub")
+        self.helper("write", LH_REPO="richard-0421/lab-hub", LH_ORIGIN="https://github.com/richard-0421/lab-hub")
         self.assertEqual(self.saved()["pages_url"], "https://lab.example.org/board/")
-        self.helper("write", LH_REPO="richard-0417/lab-hub-data", LH_ORIGIN="https://github.com/richard-0417/lab-hub")
+        self.helper("write", LH_REPO="richard-0421/lab-hub-data", LH_ORIGIN="https://github.com/richard-0421/lab-hub")
         self.assertEqual(self.saved()["pages_url"], "https://lab.example.org/board/")
 
     def test_no_origin_writes_no_pages_url(self):
-        self.helper("write", LH_REPO="richard-0417/lab-hub", LH_ORIGIN="")
+        self.helper("write", LH_REPO="richard-0421/lab-hub", LH_ORIGIN="")
         self.assertNotIn("pages_url", self.saved())
-        self.assertEqual(self.helper("pages", LH_ORIGIN="").strip(), "https://richard-0417.github.io/lab-hub/")
+        self.assertEqual(self.helper("pages", LH_ORIGIN="").strip(), "https://richard-0421.github.io/lab-hub/")
 
 
 # --------------------------------------------------------------------------- #
@@ -593,7 +593,7 @@ class UnitAndWorkflowFilesTest(unittest.TestCase):
         path = os.path.join(ROOT, "config.example.json")
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
-        self.assertEqual(raw["github_repo"], "richard-0417/lab-hub")
+        self.assertEqual(raw["github_repo"], "richard-0421/lab-hub")
         self.assertEqual(raw["github_branch"], "data")
         self.assertEqual(raw["github_path"], "board.json")
         self.assertEqual(raw["pages_url"], "")             # derived
@@ -602,14 +602,14 @@ class UnitAndWorkflowFilesTest(unittest.TestCase):
         tmp = tempfile.mkdtemp()                            # no git origin: a fork's checkout can't skew it
         self.addCleanup(shutil.rmtree, tmp, True)
         cfg = load_config(base_dir=tmp, config_path=path, environ={})
-        self.assertEqual(cfg["pages_url"], "https://richard-0417.github.io/lab-hub/")
+        self.assertEqual(cfg["pages_url"], "https://richard-0421.github.io/lab-hub/")
 
     def test_no_data_repo_wording_in_the_default_flow(self):
         for rel in ("scripts/install-pi.sh", "scripts/install_helper.py", "config.example.json"):
             text = self.read(rel).lower()
             self.assertNotIn("not the code repo", text, rel)
             self.assertNotIn("data repo only", text, rel)
-        self.assertIn('DEFAULT_REPO = "richard-0417/lab-hub"\n', self.read("scripts/install_helper.py"))
+        self.assertIn('DEFAULT_REPO = "richard-0421/lab-hub"\n', self.read("scripts/install_helper.py"))
 
     @unittest.skipUnless(shutil.which("bash"), "needs bash")
     def test_shell_syntax_and_help(self):
@@ -619,9 +619,9 @@ class UnitAndWorkflowFilesTest(unittest.TestCase):
         p = subprocess.run(["bash", INSTALL_SH, "--help"], capture_output=True, text=True, timeout=30,
                            env=_clean_env())
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("(default richard-0417/lab-hub, the same repo as the", p.stdout)
+        self.assertIn("(default richard-0421/lab-hub, the same repo as the", p.stdout)
         self.assertNotIn("lab-hub-data", p.stdout)
-        self.assertIn("git clone --single-branch https://github.com/richard-0417/lab-hub.git", p.stdout)
+        self.assertIn("git clone --single-branch https://github.com/richard-0421/lab-hub.git", p.stdout)
         self.assertIn("--no-service", p.stdout)
         self.assertFalse(p.stdout.startswith("!"))
 
@@ -633,7 +633,7 @@ class UnitAndWorkflowFilesTest(unittest.TestCase):
                      "needs git, bash and python3")
 @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "install-pi.sh refuses to run as root")
 class InstallPiSingleRepoTest(unittest.TestCase):
-    REPO = "richard-0417/lab-hub"
+    REPO = "richard-0421/lab-hub"
 
     def setUp(self):
         self.gh = FakeGitHub()
@@ -695,7 +695,7 @@ class InstallPiSingleRepoTest(unittest.TestCase):
         self.assertEqual(out.count("Single-repo setup"), 1)
         self.assertNotIn("WARNING", out)
         self.assertNotIn("PROBLEM", out)
-        self.assertIn("From anywhere:      https://richard-0417.github.io/lab-hub/   (paste a token there once)",
+        self.assertIn("From anywhere:      https://richard-0421.github.io/lab-hub/   (paste a token there once)",
                       out)
         self.assertNotIn("?repo=", out)
         self.assertNotIn("lab-hub-data", out)
@@ -709,7 +709,7 @@ class InstallPiSingleRepoTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(cfg_path).st_mode), 0o600)
         # what the server makes of it (kiosk footer, branch, path)
         cfg = load_config(base_dir=self.app, config_path=cfg_path, environ={})
-        self.assertEqual(cfg["pages_url"], "https://richard-0417.github.io/lab-hub/")
+        self.assertEqual(cfg["pages_url"], "https://richard-0421.github.io/lab-hub/")
         self.assertEqual((cfg["github_branch"], cfg["github_path"]), ("data", "board.json"))
         paths = [r["path"] for r in self.gh.requests]
         self.assertIn("/repos/%s/git/ref/heads/data" % self.REPO, paths)

@@ -128,7 +128,7 @@ def _normalize_repo(value):
     if s.endswith(".git"):
         s = s[:-4]
     if not repo_ok(s):
-        return "", "github_repo %s is not a valid repository (use owner/name, e.g. richard-0417/lab-hub)" % _shown(
+        return "", "github_repo %s is not a valid repository (use owner/name, e.g. richard-0421/lab-hub)" % _shown(
             value
         )
     return s, None

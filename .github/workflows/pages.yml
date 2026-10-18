@@ -1,5 +1,5 @@
 # Publishes static/ (unchanged, no build step) to GitHub Pages:
-#   https://richard-0417.github.io/lab-hub/
+#   https://richard-0421.github.io/lab-hub/
 #
 # Runs on pushes to main that touch static/ or this file, or by hand from the
 # Actions tab ("Run workflow"). The board lives on the orphan "data" branch

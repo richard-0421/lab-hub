@@ -23,7 +23,7 @@ from app.github_sync import GitHubClient, SyncWorker, git_blob_sha  # noqa: E402
 from app.store import OpError, Store, StoreUnavailable  # noqa: E402
 from tests.mock_github import MockGitHub  # noqa: E402
 
-REPO = "richard-0417/lab-hub"
+REPO = "richard-0421/lab-hub"
 TOKEN = "test-token"
 TS = "2026-10-16T14:00:00Z"
 
@@ -409,7 +409,7 @@ class ModeSwitchTests(TempDirTest):
         self.seed(g, self.ABCD[0])
         self.local_store()
         with self.assertLogs("labhub.store", level="WARNING") as logs:
-            g2 = self.gh_store(repo="richard-0417/another-board")
+            g2 = self.gh_store(repo="richard-0421/another-board")
         self.assertEqual([(op["op"], op["item"]["id"]) for op in g2.pending()], [("add", "t-a")])
         self.assertEqual(g2.base(), B.empty_board())
         self.assertTrue(any("not where this board was last synced" in m for m in logs.output), logs.output)
@@ -815,7 +815,7 @@ class SyncTests(TempDirTest):
         self.assertNotIn("wrong-token", json.dumps(status))
 
     def test_repo_not_found(self):
-        store, worker = self.start(repo="richard-0417/does-not-exist")
+        store, worker = self.start(repo="richard-0421/does-not-exist")
         status = worker.sync_once()
         self.assertEqual(status["state"], "error")
         self.assertEqual(status["last_error"], "repo not found, or the token can't see it")

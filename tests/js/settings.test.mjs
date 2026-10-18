@@ -32,42 +32,42 @@ const loc = (hostname, pathname = "/", search = "") => ({ hostname, pathname, se
 
 describe("defaultGitHubSettings", () => {
   test("project site <owner>.github.io/<repo>/", () => {
-    const s = defaultGitHubSettings(loc("richard-0417.github.io", "/lab-hub/"));
-    assert.deepEqual(s, { apiBase: "https://api.github.com", repo: "richard-0417/lab-hub", branch: "data", path: "board.json", token: "", clientName: "" });
-    assert.equal(defaultGitHubSettings(loc("richard-0417.github.io", "/lab-hub")).repo, "richard-0417/lab-hub");
-    assert.equal(defaultGitHubSettings(loc("richard-0417.github.io", "/lab-hub/index.html")).repo, "richard-0417/lab-hub");
+    const s = defaultGitHubSettings(loc("richard-0421.github.io", "/lab-hub/"));
+    assert.deepEqual(s, { apiBase: "https://api.github.com", repo: "richard-0421/lab-hub", branch: "data", path: "board.json", token: "", clientName: "" });
+    assert.equal(defaultGitHubSettings(loc("richard-0421.github.io", "/lab-hub")).repo, "richard-0421/lab-hub");
+    assert.equal(defaultGitHubSettings(loc("richard-0421.github.io", "/lab-hub/index.html")).repo, "richard-0421/lab-hub");
     assert.equal(defaultGitHubSettings(loc("Someone.GitHub.io", "/other-repo/x/")).repo, "someone/other-repo");
   });
 
   test("user site at the root", () => {
-    assert.equal(defaultGitHubSettings(loc("richard-0417.github.io", "/")).repo, "richard-0417/richard-0417.github.io");
-    assert.equal(defaultGitHubSettings(loc("richard-0417.github.io", "/index.html")).repo, "richard-0417/richard-0417.github.io");
+    assert.equal(defaultGitHubSettings(loc("richard-0421.github.io", "/")).repo, "richard-0421/richard-0421.github.io");
+    assert.equal(defaultGitHubSettings(loc("richard-0421.github.io", "/index.html")).repo, "richard-0421/richard-0421.github.io");
   });
 
-  test("anywhere else -> richard-0417/lab-hub; no location in node", () => {
-    assert.equal(defaultGitHubSettings(loc("localhost", "/")).repo, "richard-0417/lab-hub");
-    assert.equal(defaultGitHubSettings(null).repo, "richard-0417/lab-hub");
-    assert.equal(defaultGitHubSettings().repo, "richard-0417/lab-hub");
+  test("anywhere else -> richard-0421/lab-hub; no location in node", () => {
+    assert.equal(defaultGitHubSettings(loc("localhost", "/")).repo, "richard-0421/lab-hub");
+    assert.equal(defaultGitHubSettings(null).repo, "richard-0421/lab-hub");
+    assert.equal(defaultGitHubSettings().repo, "richard-0421/lab-hub");
   });
 
   test("one-repo default: code on main, board.json on the data branch of the same repo", () => {
-    assert.equal(DEFAULT_REPO, "richard-0417/lab-hub");
+    assert.equal(DEFAULT_REPO, "richard-0421/lab-hub");
     assert.equal(DEFAULT_BRANCH, "data");
     assert.equal(DEFAULT_PATH, "board.json");
     // the Pages site of lab-hub defaults to lab-hub itself — no ?repo= needed
-    const s = defaultGitHubSettings(loc("richard-0417.github.io", "/lab-hub/"));
-    assert.equal(s.repo, pagesCodeRepo(loc("richard-0417.github.io", "/lab-hub/")));
+    const s = defaultGitHubSettings(loc("richard-0421.github.io", "/lab-hub/"));
+    assert.equal(s.repo, pagesCodeRepo(loc("richard-0421.github.io", "/lab-hub/")));
     assert.equal(s.branch, "data");
     assert.equal(s.path, "board.json");
     // a separate data repo is still one ?repo= (or a Settings change) away
-    assert.equal(defaultGitHubSettings(loc("richard-0417.github.io", "/lab-hub/", "?repo=richard-0417/lab-hub-data")).repo, "richard-0417/lab-hub-data");
+    assert.equal(defaultGitHubSettings(loc("richard-0421.github.io", "/lab-hub/", "?repo=richard-0421/lab-hub-data")).repo, "richard-0421/lab-hub-data");
   });
 
   test("pagesCodeRepo", () => {
-    assert.equal(pagesCodeRepo(loc("richard-0417.github.io", "/lab-hub/")), "richard-0417/lab-hub");
-    assert.equal(pagesCodeRepo(loc("Richard-0417.GitHub.io", "/lab-hub/index.html")), "richard-0417/lab-hub");
-    assert.equal(pagesCodeRepo(loc("richard-0417.github.io", "/")), "richard-0417/richard-0417.github.io");
-    assert.equal(pagesCodeRepo(loc("richard-0417.github.io", "/index.html")), "richard-0417/richard-0417.github.io");
+    assert.equal(pagesCodeRepo(loc("richard-0421.github.io", "/lab-hub/")), "richard-0421/lab-hub");
+    assert.equal(pagesCodeRepo(loc("Richard-0421.GitHub.io", "/lab-hub/index.html")), "richard-0421/lab-hub");
+    assert.equal(pagesCodeRepo(loc("richard-0421.github.io", "/")), "richard-0421/richard-0421.github.io");
+    assert.equal(pagesCodeRepo(loc("richard-0421.github.io", "/index.html")), "richard-0421/richard-0421.github.io");
     assert.equal(pagesCodeRepo(loc("localhost", "/lab-hub/")), null);
     assert.equal(pagesCodeRepo(loc(".github.io", "/x/")), null);
     assert.equal(pagesCodeRepo(null), null);
@@ -82,13 +82,13 @@ describe("defaultGitHubSettings", () => {
     for (const host of ["localhost", "127.0.0.1", "[::1]", "lab.localhost"]) {
       assert.equal(defaultGitHubSettings(loc(host, "/", "?api=http://127.0.0.1:9010")).apiBase, "http://127.0.0.1:9010", host);
     }
-    for (const host of ["richard-0417.github.io", "evil.example", "localhost.evil.example", ""]) {
+    for (const host of ["richard-0421.github.io", "evil.example", "localhost.evil.example", ""]) {
       assert.equal(defaultGitHubSettings(loc(host, "/lab-hub/", "?api=https://evil.example")).apiBase, "https://api.github.com", host);
     }
   });
 
   test("unusable ?branch= / ?path= are ignored", () => {
-    const s = defaultGitHubSettings(loc("richard-0417.github.io", "/lab-hub/", "?path=../pulls/5/merge&branch=../main"));
+    const s = defaultGitHubSettings(loc("richard-0421.github.io", "/lab-hub/", "?path=../pulls/5/merge&branch=../main"));
     assert.equal(s.path, "board.json");
     assert.equal(s.branch, "data");
     assert.equal(defaultGitHubSettings(loc("x.github.io", "/y/", "?path=a/%2e%2e/b")).path, "board.json");
@@ -98,7 +98,7 @@ describe("defaultGitHubSettings", () => {
 });
 
 describe("normalizeGitHubSettings / githubSettingsError", () => {
-  const pages = loc("richard-0417.github.io", "/lab-hub/");
+  const pages = loc("richard-0421.github.io", "/lab-hub/");
 
   test("a custom apiBase is dropped on a non-local page (the token only goes to api.github.com)", () => {
     assert.equal(normalizeGitHubSettings({ apiBase: "https://evil.example" }, pages).apiBase, "https://api.github.com");
@@ -130,8 +130,8 @@ describe("saved settings", () => {
   test("save / load / clear (clear also drops the cached board)", () => {
     const storage = memStorage();
     assert.equal(loadGitHubSettings(storage), null);
-    const saved = saveGitHubSettings({ repo: " richard-0417/lab-hub ", token: " ghp_x ", clientName: "Richard" }, storage);
-    assert.deepEqual(saved, { apiBase: "https://api.github.com", repo: "richard-0417/lab-hub", branch: "data", path: "board.json", token: "ghp_x", clientName: "Richard" });
+    const saved = saveGitHubSettings({ repo: " richard-0421/lab-hub ", token: " ghp_x ", clientName: "Richard" }, storage);
+    assert.deepEqual(saved, { apiBase: "https://api.github.com", repo: "richard-0421/lab-hub", branch: "data", path: "board.json", token: "ghp_x", clientName: "Richard" });
     assert.deepEqual(loadGitHubSettings(storage), saved);
     const cacheKey = githubCacheKey(saved);
     storage.setItem(cacheKey, "{}");
@@ -160,8 +160,8 @@ describe("saved settings", () => {
   });
 
   test("normalizeGitHubSettings accepts a pasted GitHub URL", () => {
-    assert.equal(normalizeGitHubSettings({ repo: "https://github.com/richard-0417/lab-hub.git" }).repo, "richard-0417/lab-hub");
-    assert.equal(normalizeGitHubSettings({ repo: "https://github.com/richard-0417/lab-hub/" }).repo, "richard-0417/lab-hub");
+    assert.equal(normalizeGitHubSettings({ repo: "https://github.com/richard-0421/lab-hub.git" }).repo, "richard-0421/lab-hub");
+    assert.equal(normalizeGitHubSettings({ repo: "https://github.com/richard-0421/lab-hub/" }).repo, "richard-0421/lab-hub");
   });
 });
 
@@ -191,7 +191,7 @@ describe("testGitHubSettings", () => {
       return b === 201 ? json(201, { sha: "abc", url: "x" }) : json(b, { message: b === 404 ? "Not Found" : "Resource not accessible by personal access token" });
     });
   const probes = (f) => f.calls.filter((c) => c.init.method === "POST");
-  const pagesLoc = loc("richard-0417.github.io", "/lab-hub/");
+  const pagesLoc = loc("richard-0421.github.io", "/lab-hub/");
 
   test("token that can write: the blob probe gets 201 -> canWrite true", async () => {
     const f = ghFake({ repos: { "a/b": json(200, { private: true }) }, blobs: { "a/b": 201 } });
@@ -255,35 +255,35 @@ describe("testGitHubSettings", () => {
   });
 
   test("default one-repo setup (board on lab-hub's data branch): one probe, no warning", async () => {
-    const f = ghFake({ blobs: { "richard-0417/lab-hub": 201 } });
-    const r = await testGitHubSettings({ repo: "richard-0417/lab-hub", token: "tok" }, f, pagesLoc);
+    const f = ghFake({ blobs: { "richard-0421/lab-hub": 201 } });
+    const r = await testGitHubSettings({ repo: "richard-0421/lab-hub", token: "tok" }, f, pagesLoc);
     assert.deepEqual(r, { ok: true, error: null, canWrite: true, private: false, warnings: [] });
-    assert.deepEqual(probes(f).map((c) => c.url), ["https://api.github.com/repos/richard-0417/lab-hub/git/blobs"]);
+    assert.deepEqual(probes(f).map((c) => c.url), ["https://api.github.com/repos/richard-0421/lab-hub/git/blobs"]);
     // owner/name compare ignores case, like GitHub
-    const g = ghFake({ blobs: { "Richard-0417/Lab-Hub": 201 } });
-    assert.deepEqual((await testGitHubSettings({ repo: "Richard-0417/Lab-Hub", token: "tok" }, g, pagesLoc)).warnings, []);
+    const g = ghFake({ blobs: { "Richard-0421/Lab-Hub": 201 } });
+    assert.deepEqual((await testGitHubSettings({ repo: "Richard-0421/Lab-Hub", token: "tok" }, g, pagesLoc)).warnings, []);
     assert.equal(probes(g).length, 1);
   });
 
   test("two-repo setup: a token that can also write the code repo gets a warning", async () => {
-    const f = ghFake({ blobs: { "richard-0417/lab-hub-data": 201, "richard-0417/lab-hub": 201 } });
-    const r = await testGitHubSettings({ repo: "richard-0417/lab-hub-data", token: "tok" }, f, pagesLoc);
+    const f = ghFake({ blobs: { "richard-0421/lab-hub-data": 201, "richard-0421/lab-hub": 201 } });
+    const r = await testGitHubSettings({ repo: "richard-0421/lab-hub-data", token: "tok" }, f, pagesLoc);
     assert.equal(r.ok, true);
     assert.equal(r.canWrite, true);
     assert.equal(r.error, null);
     assert.deepEqual(r.warnings, [
-      "This token can also change the dashboard's code (richard-0417/lab-hub). For the separate-data-repo setup, give it access to richard-0417/lab-hub-data only.",
+      "This token can also change the dashboard's code (richard-0421/lab-hub). For the separate-data-repo setup, give it access to richard-0421/lab-hub-data only.",
     ]);
     assert.deepEqual(probes(f).map((c) => c.url).sort(), [
-      "https://api.github.com/repos/richard-0417/lab-hub-data/git/blobs",
-      "https://api.github.com/repos/richard-0417/lab-hub/git/blobs",
+      "https://api.github.com/repos/richard-0421/lab-hub-data/git/blobs",
+      "https://api.github.com/repos/richard-0421/lab-hub/git/blobs",
     ]);
   });
 
   test("two-repo setup: no warning when the code repo is refused or can't be checked", async () => {
     for (const code of [403, 404, 500, "offline"]) {
-      const f = ghFake({ blobs: { "richard-0417/lab-hub-data": 201, "richard-0417/lab-hub": code } });
-      const r = await testGitHubSettings({ repo: "richard-0417/lab-hub-data", token: "tok" }, f, pagesLoc);
+      const f = ghFake({ blobs: { "richard-0421/lab-hub-data": 201, "richard-0421/lab-hub": code } });
+      const r = await testGitHubSettings({ repo: "richard-0421/lab-hub-data", token: "tok" }, f, pagesLoc);
       assert.equal(r.ok, true, String(code));
       assert.equal(r.canWrite, true, String(code));
       assert.deepEqual(r.warnings, [], String(code));
@@ -319,7 +319,7 @@ describe("testGitHubSettings", () => {
 
   test("unsafe branch / path: refused before the token is sent anywhere", async () => {
     const f = repoFetch(() => json(200, { permissions: { push: true } }));
-    const r = await testGitHubSettings({ repo: "richard-0417/lab-hub", path: "../pulls/5/merge", token: "tok" }, f);
+    const r = await testGitHubSettings({ repo: "richard-0421/lab-hub", path: "../pulls/5/merge", token: "tok" }, f);
     assert.equal(r.ok, false);
     assert.match(r.error, /file path/);
     assert.equal((await testGitHubSettings({ repo: "a/b", branch: "../x", token: "tok" }, f)).ok, false);
@@ -351,7 +351,7 @@ describe("detectMode", () => {
 
   test("*.github.io -> github without fetching", async () => {
     let n = 0;
-    const r = await detectMode({ fetchImpl: async () => (n++, json(200, { labhub: true })), loc: loc("richard-0417.github.io", "/lab-hub/") });
+    const r = await detectMode({ fetchImpl: async () => (n++, json(200, { labhub: true })), loc: loc("richard-0421.github.io", "/lab-hub/") });
     assert.deepEqual(r, { mode: "github" });
     assert.equal(n, 0);
   });
