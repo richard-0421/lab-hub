@@ -1,21 +1,21 @@
 {
   "schema": 1,
-  "updated_at": "2026-10-18T19:29:05Z",
-  "updated_by": "Lab Bench",
+  "updated_at": "2026-10-18T19:29:13Z",
+  "updated_by": "Richard",
   "tasks": [
     {
       "id": "t-p21w82rduj",
       "title": "Lab test",
       "notes": "",
-      "status": "todo",
+      "status": "done",
       "priority": "normal",
       "assignee": "",
       "due": "",
       "tags": [],
       "rank": -1,
       "created_at": "2026-10-18T19:29:05Z",
-      "updated_at": "2026-10-18T19:29:05Z",
-      "done_at": "",
+      "updated_at": "2026-10-18T19:29:13Z",
+      "done_at": "2026-10-18T19:29:13Z",
       "created_by": "Lab Bench"
     },
     {
