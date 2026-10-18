@@ -103,8 +103,13 @@ empty.
 and GitHub only accepts changes to workflow files from a credential that is
 allowed to update workflows. Any of these works:
 
-- the GitHub CLI: `brew install gh && gh auth login` (GitHub.com, HTTPS, log in
-  with a browser). It includes the workflow permission.
+- the GitHub CLI (what this Mac uses): `brew install gh`, then
+  `gh auth login --hostname github.com --git-protocol https --web`,
+  `gh auth setup-git`, and — because the default login lacks it —
+  `gh auth refresh --hostname github.com --scopes workflow`. Each login step
+  shows a one-time code to enter at <https://github.com/login/device>; make
+  sure that page is signed in as richard-0421. `gh auth status` should then
+  list `workflow` among the token scopes.
 - GitHub Desktop, signed in as richard-0421.
 - a *classic* personal access token with the `repo` and `workflow` scopes.
 
