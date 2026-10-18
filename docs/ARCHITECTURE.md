@@ -6,36 +6,39 @@ disagree, fix one of them in the same change.
 ## 1. The big picture
 
 ```
-  richard-0417/lab-hub  (public, code)            richard-0417/lab-hub-data  (board)
- ┌─────────────────────────────────────┐         ┌──────────────────────────────────┐
- │ branch main: app/ static/ scripts/  │         │ branch data: board.json          │
- │ (pushed only by the owner)          │         │                                  │
- └──┬───────────────────────┬──────────┘         └─────▲───────────────────────▲────┘
-    │ git pull every 5 min  │ Actions ──► Pages        │ Contents API          │ Contents API
-    │ (scripts/update.sh,   │ (static/ only)           │ GET/PUT, sha-checked  │ (browser's
-    │  anonymous HTTPS)     ▼                          │ (Pi's token)          │  token)
-    │   richard-0417.github.io/lab-hub/ ───────────────┼───────────┐           │
-    ▼                                                  │           ▼           │
- ┌──────────────────────────────┐                      │    ┌──────────────────┴───────┐
- │ Raspberry Pi (lab)           ├──────────────────────┘    │ Any browser, anywhere    │
- │ FastAPI app/ + local state/  │ sync thread: pull ~15 s,  │ GitHub Pages copy of     │
- │ (cache + pending op queue),  │ push ~1 s after an edit   │ static/ in "github" mode │
- │ calendar (.ics)              │                           │ • token in localStorage  │
- │ Chromium kiosk ──► "local"   │                           │ • same op queue, in JS   │
- │ mode, http://localhost:8000  │                           └──────────────────────────┘
- └──────────────────────────────┘
+                    richard-0417/lab-hub  (public)
+ ┌───────────────────────────────────────────────────────────────────┐
+ │ branch main   code (app/ static/ scripts/ …) ──► Actions ──► Pages │
+ │ branch data   board.json  (orphan: no shared history with main)    │
+ └──┬─────────────────────────────▲─────────────────────────▲─────────┘
+    │ git pull main every 5 min   │ Contents API            │ Contents API
+    │ (scripts/update.sh,         │ GET/PUT, sha-checked    │ (browser's token)
+    │  anonymous HTTPS)           │ (Pi's token)            │
+    ▼                             │                         │
+ ┌────────────────────────────────┴─┐       ┌───────────────┴──────────┐
+ │ Raspberry Pi (lab)               │       │ Any browser, anywhere    │
+ │ FastAPI app/ + local state/      │       │ GitHub Pages copy of     │
+ │ (cache + pending op queue),      │       │ static/ in "github" mode │
+ │ sync thread: pull ~15 s, push    │       │ • token in localStorage  │
+ │ ~1 s after an edit; calendar     │       │ • same op queue, in JS   │
+ │ Chromium kiosk ──► "local" mode  │       └──────────────────────────┘
+ └──────────────────────────────────┘
 ```
 
-* **Two repos.** The code repo (`lab-hub`, public, needed for free Pages) holds
-  `main`. The board lives in a separate **data repo** (default
-  `richard-0417/lab-hub-data`, private or public) on its `data` branch. Every
-  token given to the Pi or a browser is a fine-grained PAT with Contents: read &
-  write on the data repo **only**. Fine-grained PATs can be limited by repo but
-  not by branch, so a board token on the code repo could push to `main`, which
-  the Pi runs (§7) and Pages publishes. The Pi pulls `main` anonymously and
-  holds no credential that can push code; only the owner's own login
-  (`gh auth`, GitHub Desktop or a classic PAT with the `workflow` scope) pushes
-  to `main`.
+* **One repo, two branches.** `richard-0417/lab-hub` is public (free Pages).
+  `main` holds the code; the board lives on the orphan branch `data` as
+  `board.json`. Every token given to the Pi or a browser is a fine-grained PAT
+  with Contents: read & write on `lab-hub`. Fine-grained PATs can be limited
+  by repo but not by branch, so **every board token can also push to `main`**,
+  which Pages publishes and the Pi runs (§7). The owner accepted this: tokens
+  go only to trusted people; the setup dialog and README say so once. The Pi
+  pulls `main` anonymously.
+* **Optional: a separate data repo.** Everything that names the board's repo
+  (`github_repo` on the Pi, **Repository** in a browser) can point at another
+  repo, e.g. a private `richard-0417/lab-hub-data`, with tokens scoped to it
+  only. Then the board is private and board tokens can't touch the code. Both
+  `install-pi.sh` and the browser's connect check warn (in this setup only) if
+  such a token can also write the code repo.
 * **One frontend, two modes.** `static/` is served by the Pi (local mode) and
   deployed unchanged to GitHub Pages (github mode). Mode detection:
   * On a `*.github.io` host the page goes straight to **github mode** without
@@ -53,8 +56,9 @@ disagree, fix one of them in the same change.
   the origin `https://<owner>.github.io`, which **every** Pages site of that
   account shares, and sent only to `https://api.github.com`.
 * **GitHub is the meeting point.** The board lives in one JSON file
-  (`board.json`) in the data repo, so data commits never trigger a Pages build
-  and never touch the code history the Pi pulls.
+  (`board.json`) on the `data` branch. The Pages workflow only runs for `main`,
+  so data commits never trigger a Pages build, and the Pi only fetches `main`,
+  so they never touch the code history it pulls.
 * **Edits are operations, not snapshots.** Every change (add / update / delete)
   is an *op*. Each client keeps `base` (the last remote file it saw, plus its
   sha) and a queue of `pending` ops. What the user sees is
@@ -295,12 +299,12 @@ cross-site|same-site`, or an `Origin` other than this server) gets 403.
 
 | method & path | body / query | response |
 |---|---|---|
-| `GET /api/config` | | `{"labhub": true, "name", "client", "theme", "github": {"enabled", "repo", "branch", "path", "pages_url", "file_url"}, "calendar": {"configured": bool}, "lan_url"}`. **Never includes the token.** `github.enabled` is true only when both repo and token are set; `file_url` = `https://github.com/<repo>/blob/<branch>/<path>`; `lan_url` = `http://<LAN IPv4>:<port>` for teammates (the kiosk itself runs on localhost and shows it in its footer), or `null` when the server is bound to loopback or has no LAN address |
+| `GET /api/config` | | `{"labhub": true, "name", "client", "theme", "github": {"enabled", "repo", "branch", "path", "pages_url", "file_url", "last_error"}, "calendar": {"configured": bool}, "lan_url"}`. **Never includes the token.** `github.enabled` is true only when repo and token are set and `github_repo`/`github_branch`/`github_path` are valid (§6); `github.last_error` explains an invalid one (e.g. `config: github_branch 'x..y' is not a valid branch name`), else `null`; `file_url` = `https://github.com/<repo>/blob/<branch>/<path>`, or `""` when that config error is set; `lan_url` = `http://<LAN IPv4>:<port>` for teammates (the kiosk itself runs on localhost and shows it in its footer), or `null` when the server is bound to loopback or has no LAN address |
 | `GET /api/board?rev=N` | `rev` optional | `{"rev", "unchanged": true, "sync"}` if `N` equals the current rev, else `{"rev", "board", "sync"}` |
 | `POST /api/ops` | `{"ops": [op, …]}` (1–500 ops), `Content-Type: application/json`, body ≤ 2 MiB | `200 {"rev", "board", "sync"}`; `400 {"error", "index"}` if any op fails validation or an `add` would go past 2000 items (none are applied; `index` is `null` for request-level errors); `413` body too large; `415` not JSON; `503` the change couldn't be saved or 5000 ops are already queued. All errors are `{"error", "index"}` |
 | `GET /api/sync` | | `sync` object |
 | `POST /api/sync` | | runs a sync cycle now and returns `sync`: it waits ≤ 20 s for a cycle that is already running, then runs its own, which is bounded only by the per-request timeouts (15 s each, up to 3 PUT attempts plus branch creation). Clients should allow ≥ 2 min (`install-pi.sh` does) |
-| `GET /api/calendar` | | `{"configured", "events": [{"summary", "location", "start", "end", "all_day"}]}` |
+| `GET /api/calendar` | | `{"configured", "events": [{"summary", "location", "start", "end", "all_day"}]}`. Times are naive local ISO strings. `end` is always set: `DTEND`, else `DTSTART + DURATION`, else start + 1 day for an all-day (`DATE`) event, else the start (an end before the start, or equal to it for an all-day event, counts as missing). An event is listed while `start ≥ now − 3 h` or `end > now` |
 | `GET /api/version` | | `{"version": "<git sha or static-files hash>"}` — the page reloads itself when this changes |
 
 `sync` object:
@@ -313,11 +317,13 @@ cross-site|same-site`, or an `Origin` other than this server) gets 403.
   "last_sync": "2026-10-16T14:03:22Z",   // last successful contact, or null
   "last_push": "2026-10-16T14:01:10Z",   // last successful write, or null
   "last_error": null,       // human-readable message, or null
-  "repo": "richard-0417/lab-hub-data", "branch": "data", "path": "board.json"
+  "repo": "richard-0417/lab-hub", "branch": "data", "path": "board.json"
 }
 ```
 
-`syncing` is also reported before the first cycle has finished.
+`syncing` is also reported before the first cycle has finished. While `state`
+is `off`, `last_error` is the config error from §6 (or `null`); it is kept in
+memory only, never in `state/sync.json`.
 
 ### Sync cycle (Pi `github_sync.py`; the browser's `GitHubSource` mirrors it)
 
@@ -357,12 +363,19 @@ cross-site|same-site`, or an `Origin` other than this server) gets 403.
      `k` ops); remote sha = the parent → it didn't (send again); otherwise the
      file's last 10 commits decide. So an old push is never replayed over
      edits other people made since.
-   * `404`/`422` because the branch doesn't exist → create it:
-     `GET /repos/{repo}` → `default_branch`;
-     `GET /repos/{repo}/git/ref/heads/{default}` → sha;
-     `POST /repos/{repo}/git/refs {"ref": "refs/heads/{branch}", "sha"}`; retry.
-     (The setup pushes an orphan `data` branch, so this is only a fallback; a
-     data repo with no commits at all can't get a branch this way.)
+   * `404`/`422` whose message says the branch was not found → create it as an
+     **orphan** (both clients, at most once per cycle):
+     `POST /repos/{repo}/git/trees {"tree": [{"path", "mode": "100644", "type": "blob", "content": <empty board>}]}`
+     (no `base_tree`) → `POST /repos/{repo}/git/commits {"message": "<client>: create <path>…", "tree", "parents": []}`
+     → `POST /repos/{repo}/git/refs {"ref": "refs/heads/{branch}", "sha"}`;
+     then refetch, replay and PUT with the new file's sha. A `422 Reference
+     already exists` means someone else just created it: carry on with theirs.
+     The Git database API answers `409` on a repo with no commits at all →
+     `error: "the GitHub repo has no commits yet - push the Lab Hub code to it
+     first, then the '<branch>' branch is created on the next sync"`. The setup
+     pushes a prepared orphan `data` branch first, so this is only a fallback.
+     Any other `404` on PUT is a token-permission error; any other `422` is
+     reported as GitHub's message.
 4. Persist `state/` atomically (write temp file, `os.replace`).
 
 Timing: the thread wakes every `sync_interval` s (default 15) or ~1 s after a
@@ -407,7 +420,7 @@ Then write `state/migrated`. The `.db` file is opened read-only.
 | `js/board.js` | pure model mirroring `app/board.py` (+ `planMove`, `newId`, `nowIso`) |
 | `js/sources.js` | `LocalSource` (Pi API) and `GitHubSource` (GitHub API) — same interface — plus `detectMode` and the GitHub settings helpers |
 | `js/quickadd.js` | parses quick-add text: `@name`, `!high`/`!low`, `#tag`, `due:…`/`^fri` |
-| `js/app.js` + `js/ui/*.js` | UI: header, task board, side panels, editor, drag-and-drop, toasts, settings, the waiting overlay |
+| `js/app.js` + `js/ui/*.js` | UI: header, task board, side panels, editor, drag-and-drop, toasts, settings, the waiting overlay; `ui/lifecycle.js` decides when a version reload is safe |
 
 ### Source interface (both sources implement it)
 
@@ -423,6 +436,23 @@ await src.syncNow()
 src.stop()
 ```
 
+Both sources refuse (reject `submit`, queue nothing) a batch whose `add`s would
+push a collection past 2000 items, with the Pi's exact message `board full:
+<coll> already has 2000 items - delete some first (e.g. clear done tasks)`
+(`checkRoom` in `board.js`); `applyOp` treats an `add` into a full collection
+as a no-op on both sides.
+
+`LocalSource` also has `unsent` (ops only in this page's outbox) and `flush()`
+(push the outbox without `api/sync`; never rejects). It posts the outbox in
+batches of ≤ 500 ops and ≈ 1 MiB. Answers `400`, `403`, `413` and `415` from
+`POST api/ops` are permanent: the op named by `index` (else the batch) is
+dropped, the board reloaded and `submit` rejects with the server's text. `503`
+and network errors keep the ops and retry. Before a version reload the kiosk
+page flushes and re-checks (`ui/lifecycle.js`), and it waits while a dialog is
+open, a card is being dragged, a field holds unsent text, or someone touched
+the page in the last 45 s (after 10 idle minutes a dialog or draft no longer
+blocks).
+
 Both sources' `sync` objects add `mode`, `canEdit`, `link` and `loaded` (a
 real board has been received or restored from cache) to the fields of §4.
 `LocalSource` passes the Pi's object through (its `pending` also counts the
@@ -436,9 +466,10 @@ the states `syncing`, `ok`, `pending`, `offline`, `error` and **`readonly`**
 * Saved settings (`localStorage["labhub:github"]`) always win. Without them,
   defaults come from the page URL: `?repo=`, `?branch=`, `?path=` pre-fill a
   first connect only; an unusable branch or path is ignored. Without `?repo=`
-  the default repo is `<owner>/<first path segment>` of the page URL, i.e. the
-  code repo, so every shared link (README, the kiosk's `pages_url`) carries
-  `?repo=<data repo>`. `?api=` (a mock server) is honoured only
+  the default repo is `<owner>/<first path segment>` of the page URL (root site:
+  `<owner>/<owner>.github.io`; elsewhere `richard-0417/lab-hub`), i.e. the same
+  repo as the code, branch `data`, file `board.json`. Only the optional
+  separate-data-repo setup needs `?repo=` in shared links. `?api=` (a mock server) is honoured only
   on a local development page (`localhost`, `127.0.0.1`, `[::1]`,
   `*.localhost`); on any other host the token only ever goes to
   `https://api.github.com`.
@@ -450,7 +481,18 @@ the states `syncing`, `ok`, `pending`, `offline`, `error` and **`readonly`**
   `https://raw.githubusercontent.com/<repo>/<branch>/<path>` (falling back to
   the API if that fails). That doesn't use the API's 60 requests/hour per-IP
   quota, but GitHub's CDN caches it for up to 5 minutes, and it only works for
-  a public data repo.
+  a public repo.
+* `testGitHubSettings(settings, fetchImpl, loc)` (the connect dialog's check)
+  returns `{ok, error, canWrite, private, warnings}`. With a token it proves
+  write access with `POST /repos/<repo>/git/blobs` of one constant blob (no
+  ref, file or history changes): `201` → `canWrite: true`; `403`/`404` →
+  `false` (the dialog then asks for *Connect anyway*); anything else → `null`
+  (connects, with a note). `warnings` is non-empty only in the two-repo setup,
+  when the token can also write the code repo the page is served from.
+* The connect dialog shows the trust note once (one-repo setup only), says the
+  token is stored for `<owner>.github.io` and readable by any page there,
+  validates repo/branch/path inline (`githubSettingsError`), and shows the
+  **API base** field only on local development pages (`customApiAllowed`).
 * Extras over the Pi's cycle: for 15 s after its own write it ignores a GET
   that still returns the old sha; a batch that wouldn't change the file makes
   no commit; on a rate limit it waits until `x-ratelimit-reset` /
@@ -466,10 +508,10 @@ the states `syncing`, `ok`, `pending`, `offline`, `error` and **`readonly`**
 | `theme` | `"dark"` | `dark` \| `light` \| `auto` — kiosk default theme (a viewer can override in their browser) |
 | `calendar_ics` | `""` | published Outlook `.ics` URL or local path; empty = calendar panel shows setup hint |
 | `calendar_max_events` | `8` | |
-| `github_repo` | `""` | the **data** repo, `owner/name`, e.g. `richard-0417/lab-hub-data`; empty = local-only |
+| `github_repo` | `""` | `owner/name` of the repo holding the board, normally `richard-0417/lab-hub` (the installer's default and `config.example.json`); empty = local-only |
 | `github_branch` | `"data"` | branch that holds the board file |
 | `github_path` | `"board.json"` | file path on that branch |
-| `github_token` | `""` | fine-grained PAT with **Contents: read & write** on the data repo only (prefer env `LABHUB_GITHUB_TOKEN`); never sent to browsers |
+| `github_token` | `""` | fine-grained PAT with **Contents: read & write** on that repo (prefer env `LABHUB_GITHUB_TOKEN`); never sent to browsers |
 | `github_api` | `"https://api.github.com"` | override for tests (mock server) |
 | `sync_interval` | `15` | seconds between pulls |
 | `client_name` | `"lab-pi"` | shown in commit messages and as `by` of kiosk edits |
@@ -477,6 +519,13 @@ the states `syncing`, `ok`, `pending`, `offline`, `error` and **`readonly`**
 | `state_dir` | `"state"` | local sync state (relative to the app folder) |
 | `db_path` | `"labhub.db"` | legacy SQLite file to import once |
 | `allowed_hosts` | `""` | extra host names browsers may use to reach the server (besides localhost, IP addresses and this machine's hostname / `<hostname>.local`): a JSON list, or a comma-separated string (`LABHUB_ALLOWED_HOSTS`). A leading `.` allows every subdomain; `"*"` turns the Host check off |
+
+`github_repo` must be `owner/name` of `[A-Za-z0-9._-]` with no `.`/`..`
+part; `github_branch` and `github_path` must be `/`-joined parts of
+`[A-Za-z0-9._-]` with no empty, `.` or `..` part, and a branch also may not
+contain `..`, have a part starting with `.`, or end with `.lock` or `.`. An
+invalid value turns GitHub sync off (one WARNING in the log, the reason in
+`github.last_error` / `last_error`); the server still starts.
 
 Environment-only settings: `LABHUB_CONFIG` (path of the config file to read
 instead of `config.json`) and `LABHUB_LOG_LEVEL` (level of the `labhub`
@@ -507,8 +556,10 @@ install user. It never runs the checkout's own copy.
   `/etc/systemd/system` and never runs pulled code as root.
 
 The server itself runs the pulled code as the install user (who on Raspberry
-Pi OS has sudo), so the real protection is §1's rule that no handed-out token
-can push to the code repo. The open kiosk page notices the new `/api/version`
+Pi OS has sudo). In the one-repo setup every board token can push to `main`
+(§1), so the protection is giving tokens only to trusted people; the optional
+separate data repo, or a ruleset that requires pull requests on `main`
+(README › Security & privacy), removes that. The open kiosk page notices the new `/api/version`
 within a minute and reloads itself. Pages redeploys automatically on every push
 to `main` that touches `static/` (the workflow uses Node 24 action majors:
 `checkout@v5`, `configure-pages@v6`, `upload-pages-artifact@v5`,
