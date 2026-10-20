@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "updated_at": "2026-10-18T19:38:32Z",
-  "updated_by": "Richard",
+  "updated_at": "2026-10-20T21:19:16Z",
+  "updated_by": "Lab Bench",
   "tasks": [
     {
       "id": "t-9kibgovb8k",
@@ -35,6 +35,18 @@
     }
   ],
   "requests": [
+    {
+      "id": "r-kskcc2q5n6",
+      "item": "Thin 1.5mm od 0.75mm id tubes, silicone",
+      "qty": "",
+      "requested_by": "Lab Bench",
+      "status": "new",
+      "notes": "",
+      "link": "",
+      "rank": -2,
+      "created_at": "2026-10-20T21:19:16Z",
+      "updated_at": "2026-10-20T21:19:16Z"
+    },
     {
       "id": "r-ihokj0dbt7",
       "item": "Resin - UV cure",
