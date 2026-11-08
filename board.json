@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated_at": "2026-11-08T22:23:56Z",
+  "updated_at": "2026-11-08T22:23:58Z",
   "updated_by": "Lab Bench",
   "tasks": [
     {
@@ -25,12 +25,12 @@
       "item": "foam, insulating, big boxes",
       "qty": "",
       "requested_by": "Lab Bench",
-      "status": "ordered",
+      "status": "received",
       "notes": "",
       "link": "",
       "rank": -4,
       "created_at": "2026-10-23T19:28:36Z",
-      "updated_at": "2026-11-04T15:54:34Z"
+      "updated_at": "2026-11-08T22:23:58Z"
     },
     {
       "id": "r-kskcc2q5n6",
